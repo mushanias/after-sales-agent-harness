@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 
-
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
     """描述创建模型客户端所需的稳定配置契约。"""

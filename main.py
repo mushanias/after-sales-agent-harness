@@ -8,7 +8,6 @@ from typing import Any
 
 from model_pool import DEFAULT_MODEL, MODEL_POOL, ModelConfig
 
-
 SYSTEM_PROMPT = """你是售后处理 Agent。
 当用户提供订单号并询问订单信息时，使用 lookup_order 查询。
 只能根据工具返回的信息回答，不要编造订单或处理结果。
@@ -40,19 +39,42 @@ ORDERS = {
     "A1002": {"product": "机械键盘", "status": "运输中", "amount": 499.0},
 }
 
+TOOL_HANDLERS={}
 
-def lookup_order(order_id: str) -> str:
-    """返回指定订单的模拟查询结果。"""
+def execute_tool(tool_call: Any) -> str:
+    """解析模型给出的工具调用，执行对应函数，并返回 JSON 字符串。"""
+    tool_name = tool_call.function.name
 
-    order = ORDERS.get(order_id)
-    if order is None:
-        return json.dumps(
-            {"found": False, "order_id": order_id}, ensure_ascii=False
-        )
-    return json.dumps(
-        {"found": True, "order_id": order_id, **order}, ensure_ascii=False
-    )
+    try:
+        arguments = json.loads(tool_call.function.arguments)
+    except json.JSONDecodeError as error:
+        result = {
+            "ok": False,
+            "error": "INVALID_TOOL_ARGUMENTS",
+            "message": str(error),
+        }
+        return json.dumps(result, ensure_ascii=False)
 
+    handler = TOOL_HANDLERS.get(tool_name)
+    if handler is None:
+        result = {
+            "ok": False,
+            "error": "UNKNOWN_TOOL",
+            "message": f"没有注册工具 {tool_name}",
+        }
+        return json.dumps(result, ensure_ascii=False)
+
+    try:
+        result = handler(**arguments)
+    except (TypeError, ValueError) as error:
+        result = {
+            "ok": False,
+            "error": "TOOL_EXECUTION_ERROR",
+            "message": str(error),
+        }
+
+    return json.dumps(result, ensure_ascii=False)
+# ========================================================
 
 def agent_loop(
     client: Any,
@@ -66,62 +88,33 @@ def agent_loop(
             model=model.model_id,
             messages=[{"role": "system", "content": SYSTEM_PROMPT}, *messages],
             tools=TOOLS,
-            max_tokens=1024,
+            max_tokens=8000,
         )
         response_message = response.choices[0].message
+
+        messages.append(response_message.model_dump(exclude_none=True))
+
         tool_calls = response_message.tool_calls or []
-
-        assistant_message: dict[str, Any] = {
-            "role": "assistant",
-            "content": response_message.content,
-        }
-        if tool_calls:
-            assistant_message["tool_calls"] = [
-                {
-                    "id": tool_call.id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.function.name,
-                        "arguments": tool_call.function.arguments,
-                    },
-                }
-                for tool_call in tool_calls
-            ]
-        messages.append(assistant_message)
-
         if not tool_calls:
-            return
+            return response_message.content
 
         for tool_call in tool_calls:
-            try:
-                arguments = json.loads(tool_call.function.arguments)
-            except (json.JSONDecodeError, TypeError):
-                arguments = None
-
-            if tool_call.function.name != "lookup_order":
-                output = f"Error: unknown tool {tool_call.function.name}"
-            elif not isinstance(arguments, dict):
-                output = "Error: tool arguments must be a JSON object"
-            else:
-                order_id = arguments.get("order_id")
-                if not isinstance(order_id, str) or not order_id.strip():
-                    output = "Error: order_id must be a non-empty string"
-                else:
-                    output = lookup_order(order_id.strip())
-
-            print(f"[tool] {tool_call.function.name}({arguments})")
-            # 每个工具结果都必须紧跟对应的调用 ID，避免多工具结果错配。
             messages.append(
                 {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": output,
-                }
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": execute_tool(tool_call),
+            }
             )
 
 
+
 def main() -> None:
-    """启动保留当前会话历史的命令行交互。"""
+    """
+    启动保留当前会话历史的命令行交互。
+    上游通过ModelConfig来提供llm
+    目前只支持openai，已经预留了连接池
+    """
 
     try:
         from openai import OpenAI

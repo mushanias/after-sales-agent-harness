@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from hooks import AFTER_MODEL_RESPONSE_HOOKS
 from model import ModelConfig
 from tool import TOOL_HANDLERS, TOOLS
 
@@ -75,6 +76,9 @@ def agent_loop(
         )
         response_message = response.choices[0].message
         messages.append(response_message.model_dump(exclude_none=True))
+
+        for hook in AFTER_MODEL_RESPONSE_HOOKS:
+            hook(response_message)
 
         tool_calls = response_message.tool_calls or []
         if not tool_calls:

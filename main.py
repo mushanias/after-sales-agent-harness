@@ -39,7 +39,8 @@ ORDERS = {
     "A1002": {"product": "机械键盘", "status": "运输中", "amount": 499.0},
 }
 
-TOOL_HANDLERS={}
+TOOL_HANDLERS = {}
+
 
 def execute_tool(tool_call: Any) -> str:
     """解析模型给出的工具调用，执行对应函数，并返回 JSON 字符串。"""
@@ -47,11 +48,19 @@ def execute_tool(tool_call: Any) -> str:
 
     try:
         arguments = json.loads(tool_call.function.arguments)
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, TypeError) as error:
         result = {
             "ok": False,
             "error": "INVALID_TOOL_ARGUMENTS",
             "message": str(error),
+        }
+        return json.dumps(result, ensure_ascii=False)
+
+    if not isinstance(arguments, dict):
+        result = {
+            "ok": False,
+            "error": "INVALID_TOOL_ARGUMENTS",
+            "message": "工具参数必须是 JSON 对象",
         }
         return json.dumps(result, ensure_ascii=False)
 
@@ -74,13 +83,16 @@ def execute_tool(tool_call: Any) -> str:
         }
 
     return json.dumps(result, ensure_ascii=False)
+
+
 # ========================================================
+
 
 def agent_loop(
     client: Any,
     model: ModelConfig,
     messages: list[dict[str, Any]],
-) -> None:
+) -> str | None:
     """持续执行模型请求的工具，直到模型决定直接回复。"""
 
     while True:
@@ -101,12 +113,11 @@ def agent_loop(
         for tool_call in tool_calls:
             messages.append(
                 {
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": execute_tool(tool_call),
-            }
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": execute_tool(tool_call),
+                }
             )
-
 
 
 def main() -> None:
@@ -142,9 +153,7 @@ def main() -> None:
             continue
 
         history.append({"role": "user", "content": query})
-        agent_loop(client, model, history)
-
-        content = history[-1]["content"]
+        content = agent_loop(client, model, history)
         if content:
             print(content)
 

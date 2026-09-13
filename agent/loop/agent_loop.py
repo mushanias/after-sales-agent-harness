@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from hooks import AFTER_MODEL_RESPONSE_HOOKS
+from hooks import trigger_hooks,approval_middleware
 from model import ModelConfig
-from tool import TOOL_HANDLERS, TOOLS
+from tool import TOOLS
 
 
 SYSTEM_PROMPT = """你是售后处理 Agent。
@@ -15,9 +15,30 @@ SYSTEM_PROMPT = """你是售后处理 Agent。
 只能根据工具返回的信息回答，不要编造订单或处理结果。
 """
 
+TOOL_CALL_REJECTED_RESULT = json.dumps(
+    {
+        "ok": False,
+        "error": "TOOL_PERMISSION_DENIED",
+        "message": "工具调用未通过执行前检查",
+    },
+    ensure_ascii=False,
+)
+
 
 def execute_tool(tool_call: Any) -> str:
-    """解析模型给出的工具调用，执行对应函数，并返回 JSON 字符串。"""
+    """
+    在 Loop 允许执行工具后，解析参数并调用已注册的处理器。
+
+    调用方式：
+        execute_tool(tool_call)
+
+    输入字段：
+        tool_call：模型 SDK 返回的工具调用对象，必须包含工具名和 JSON 参数。
+
+    输出字段：
+        JSON 字符串；成功时包含工具实现返回的字段，失败时包含 ok、error 和
+        message，供下一轮模型响应使用。
+    """
 
     tool_name = tool_call.function.name
 
@@ -39,7 +60,8 @@ def execute_tool(tool_call: Any) -> str:
         }
         return json.dumps(result, ensure_ascii=False)
 
-    handler = TOOL_HANDLERS.get(tool_name)
+    handler = TOOLS.get(tool_name)
+
     if handler is None:
         result = {
             "ok": False,
@@ -77,18 +99,19 @@ def agent_loop(
         response_message = response.choices[0].message
         messages.append(response_message.model_dump(exclude_none=True))
 
-        for hook in AFTER_MODEL_RESPONSE_HOOKS:
-            hook(response_message)
-
         tool_calls = response_message.tool_calls or []
         if not tool_calls:
             return response_message.content
 
         for tool_call in tool_calls:
+            tool_result = approval_middleware(
+                tool_call,
+                execute_tool(tool_call),
+            )
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": execute_tool(tool_call),
+                    "content": tool_result,
                 }
             )

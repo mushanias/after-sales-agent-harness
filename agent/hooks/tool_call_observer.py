@@ -3,23 +3,22 @@
 from typing import Any
 
 
-def observe_tool_calls(response_message: Any) -> None:
+def observe_tool_call(tool_call: Any) -> None:
     """
-    观察模型在本轮响应中请求调用的工具。
+    在 PreToolUse 阶段观察模型请求调用的单个工具。
 
-    调用时机：
-        模型响应写入消息历史之后、工具真正执行之前。
+    调用方式：
+        observe_tool_call(tool_call)
 
-    接收内容：
-        response_message：模型返回的完整 assistant 消息。
+    输入字段：
+        tool_call：模型 SDK 返回的单个工具调用对象。
 
-    行为边界：
-        只输出工具名和模型生成的原始参数，不修改响应，也不执行工具。
+    输出字段：
+        无返回值；只输出工具名和原始参数，不修改调用，也不执行工具。
     """
 
-    for tool_call in response_message.tool_calls or []:
-        print(
-            "[hook:tool_call] "
-            f"name={tool_call.function.name} "
-            f"arguments={tool_call.function.arguments}"
-        )
+    print(
+        "[hook:tool_call] "
+        f"name={tool_call.function.name} "
+        f"arguments={tool_call.function.arguments}"
+    )

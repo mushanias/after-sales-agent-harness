@@ -5,25 +5,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from hooks import trigger_hooks,approval_middleware
+from hooks import trigger_hooks
+from middleware import approval_middleware
 from model import ModelConfig
-from tool import TOOLS
+from tool import TOOL_HANDLERS, TOOLS
 
 
 SYSTEM_PROMPT = """你是售后处理 Agent。
 当用户提供订单号并询问订单信息时，使用 lookup_order 查询。
 只能根据工具返回的信息回答，不要编造订单或处理结果。
 """
-
-TOOL_CALL_REJECTED_RESULT = json.dumps(
-    {
-        "ok": False,
-        "error": "TOOL_PERMISSION_DENIED",
-        "message": "工具调用未通过执行前检查",
-    },
-    ensure_ascii=False,
-)
-
 
 def execute_tool(tool_call: Any) -> str:
     """
@@ -60,7 +51,7 @@ def execute_tool(tool_call: Any) -> str:
         }
         return json.dumps(result, ensure_ascii=False)
 
-    handler = TOOLS.get(tool_name)
+    handler = TOOL_HANDLERS.get(tool_name)
 
     if handler is None:
         result = {
@@ -104,10 +95,13 @@ def agent_loop(
             return response_message.content
 
         for tool_call in tool_calls:
+            trigger_hooks("PreToolUse", tool_call)
             tool_result = approval_middleware(
                 tool_call,
-                execute_tool(tool_call),
+                execute_tool,
             )
+            trigger_hooks("PostToolUse", tool_call, tool_result)
+
             messages.append(
                 {
                     "role": "tool",

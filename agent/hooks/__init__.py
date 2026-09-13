@@ -2,11 +2,10 @@
 
 from typing import Any, Callable
 
-from .tool_permission import approval_middleware
 from .tool_call_observer import observe_tool_call
 
 
-HookCallback = Callable[..., bool | None]
+HookCallback = Callable[..., None]
 
 HOOKS: dict[str, list[HookCallback]] = {
     "PreToolUse": [],
@@ -34,7 +33,7 @@ def register_hook(event_name: str, callback: HookCallback) -> None:
     HOOKS[event_name].append(callback)
 
 
-def trigger_hooks(event_name: str, *args: Any) -> bool:
+def trigger_hooks(event_name: str, *args: Any) -> None:
     """
     在 Loop 到达指定阶段时，依次触发该事件下显式注册的回调。
 
@@ -47,20 +46,16 @@ def trigger_hooks(event_name: str, *args: Any) -> bool:
         args：按事件契约传给回调的位置参数。
 
     输出字段：
-        True：所有回调都允许流程继续；没有注册回调时也返回 True。
-        False：某个回调拒绝继续；后续同事件回调不再执行。
+        无返回值；Hook 只观察事件，不控制工具是否执行。
     """
 
     if event_name not in HOOKS:
         raise ValueError(f"未知 Hook 事件: {event_name}")
 
     for callback in HOOKS[event_name]:
-        result = callback(*args)
-        if result is False:
-            return False
-    return True
+        callback(*args)
 
 
 register_hook("PreToolUse", observe_tool_call)
 
-__all__ = ["HOOKS", "register_hook", "trigger_hooks","approval_middleware"]
+__all__ = ["HOOKS", "register_hook", "trigger_hooks"]

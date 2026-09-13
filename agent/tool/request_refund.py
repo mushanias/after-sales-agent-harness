@@ -9,7 +9,7 @@ REFUND_REQUEST_TOOL = {
     "type": "function",
     "function": {
         "name": "request_refund",
-        "description": "根据订单号发起退款申请。该操作会改变业务状态。",
+        "description": "在确认订单符合七天无理由规则后发起退款申请。该操作会改变业务状态。",
         "parameters": {
             "type": "object",
             "properties": {

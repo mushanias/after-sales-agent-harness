@@ -9,7 +9,7 @@ ORDER_LOOKUP_TOOL = {
     "type": "function",
     "function": {
         "name": "lookup_order",
-        "description": "根据订单号查询商品、订单状态、物流状态和退款状态。",
+        "description": "根据订单号查询商品、签收信息、退货条件和退款状态。",
         "parameters": {
             "type": "object",
             "properties": {

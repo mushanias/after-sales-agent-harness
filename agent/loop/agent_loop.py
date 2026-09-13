@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any
 
 from hooks import trigger_hooks
+from knowledge.refund_policy import REFUND_POLICY
 from middleware import approval_middleware
 from model import ModelConfig
 from tool import TOOL_HANDLERS, TOOLS
 
 
-SYSTEM_PROMPT = """你是售后处理 Agent。
-当用户提供订单号并询问订单信息时，使用 lookup_order 查询。
-只能根据工具返回的信息回答，不要编造订单或处理结果。
+SYSTEM_PROMPT = f"""你是售后处理 Agent。当前日期是 {date.today().isoformat()}。
+
+你当前只处理网络购买 HiFi 耳机的七天无理由退货：
+1. 用户未提供订单号时，先询问订单号。
+2. 用户提出退款时，必须先使用 lookup_order 查询订单。
+3. 根据工具返回的订单事实和下方业务知识判断；信息不足时先询问，不要猜测。
+4. 只有明确符合规则时，才使用 request_refund 发起退款申请。
+5. 只能根据工具结果描述处理状态，不要编造订单、退款结果或到账时间。
+
+业务知识：
+{REFUND_POLICY}
 """
 
 def execute_tool(tool_call: Any) -> str:

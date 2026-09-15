@@ -2,14 +2,14 @@
 
 from typing import Any
 
-from knowledge.order import ORDERS
+from knowledge.mock_orders import ORDERS
 
 
 ORDER_LOOKUP_TOOL = {
     "type": "function",
     "function": {
         "name": "lookup_order",
-        "description": "根据订单号查询商品、签收信息、退货条件和退款状态。",
+        "description": "根据订单号查询购买日期、物流状态、签收日期和退款状态。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -41,7 +41,7 @@ def lookup_order(order_id: str) -> dict[str, Any]:
         message：失败原因，供模型向用户解释当前状态。
 
     当前边界：
-        当前从 knowledge.order.ORDERS 读取模拟订单；以后替换数据来源时保持本函数
+        当前从 knowledge.mock_orders.ORDERS 读取模拟订单；以后替换数据来源时保持本函数
         的输入输出契约不变。
     """
 

@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from knowledge.order import ORDERS
+from knowledge.mock_orders import ORDERS
 
 
 REFUND_REQUEST_TOOL = {
@@ -42,7 +42,7 @@ def request_refund(order_id: str) -> dict[str, Any]:
         message：失败原因，供模型向用户解释当前状态。
 
     当前边界：
-        当前修改 knowledge.order.ORDERS 中的 refund_status；以后替换数据来源时保持
+        当前修改 knowledge.mock_orders.ORDERS 中的 refund_status；以后替换数据来源时保持
         本函数的输入输出契约不变。当前不判断七天无理由资格。
     """
 

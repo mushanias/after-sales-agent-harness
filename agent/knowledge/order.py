@@ -7,7 +7,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from knowledge.mock_orders import ORDERS
+from knowledge.order_store import insert_order
 
 
 class ShippingStatus(str, Enum):
@@ -24,6 +24,7 @@ class Order(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
     order_id: str
+    product_name: str
     purchased_at: date
     shipping_status: ShippingStatus
     received_at: date | None = None
@@ -68,10 +69,8 @@ def set_order(order: Order) -> None:
         无返回值；重复订单号会抛出 ValueError，避免静默覆盖已有订单。
 
     当前边界：
-        这个函数只用于按需添加单笔订单；mock_orders.py 中的手写数据不通过
-        本函数加载。商品是否完好来自用户反馈，不属于订单数据。
+        这个函数只用于按需添加单笔订单；mock_orders.py 只负责空数据库的首次
+        初始化。商品是否完好来自用户反馈，不属于订单数据。
     """
 
-    if order.order_id in ORDERS:
-        raise ValueError(f"订单 {order.order_id} 已存在")
-    ORDERS[order.order_id] = order.model_dump(mode="json")
+    insert_order(order.model_dump(mode="json"))

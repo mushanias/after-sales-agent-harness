@@ -13,4 +13,5 @@ class Permissions(str, Enum):
 TOOL_PERMISSIONS: dict[str, Permissions] = {
     "lookup_order": Permissions.ALLOW,
     "request_refund": Permissions.ASK,
+    "todo_write": Permissions.ALLOW,
 }

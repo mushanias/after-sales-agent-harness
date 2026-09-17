@@ -21,6 +21,8 @@ SYSTEM_PROMPT = f"""你是售后处理 Agent。当前日期是 {date.today().iso
 3. 根据工具返回的订单事实和下方业务知识判断；信息不足时先询问，不要猜测。
 4. 只有明确符合规则时，才使用 request_refund 发起退款申请。
 5. 只能根据工具结果描述处理状态，不要编造订单、退款结果或到账时间。
+6. 当请求需要多个步骤或处理多个订单时，先使用 todo_write 建立完整计划，并随着
+   处理进度更新步骤状态；简单查询不需要创建 Todo。
 
 业务知识：
 {REFUND_POLICY}
@@ -98,6 +100,7 @@ def agent_loop(
             max_tokens=8000,
         )
         response_message = response.choices[0].message
+        trigger_hooks("PostModelResponse", response_message)
         messages.append(response_message.model_dump(exclude_none=True))
 
         tool_calls = response_message.tool_calls or []
@@ -110,8 +113,10 @@ def agent_loop(
                 tool_call,
                 execute_tool,
             )
-            trigger_hooks("PostToolUse", tool_call, tool_result)
-
+            post_hook_result = trigger_hooks("PostToolUse", tool_call, tool_result)
+            if post_hook_result is not None:
+                tool_result = f"{tool_result}\n{post_hook_result}"
+            #     这里保留边界
             messages.append(
                 {
                     "role": "tool",

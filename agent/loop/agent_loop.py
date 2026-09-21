@@ -7,7 +7,7 @@ from datetime import date
 from typing import Any
 
 from hooks import trigger_hooks
-from knowledge.knowledge_base import KNOWLEDGE_BASE
+from knowledge import rules, skills
 from middleware import approval_middleware
 from model import ModelConfig
 from tool import TOOL_HANDLERS, TOOLS
@@ -34,7 +34,13 @@ SYSTEM_PROMPT = f"""你是声途 HiFi 店的售后处理 Agent。当前日期是
    处理进度更新步骤状态；简单查询不需要创建 Todo。
 
 业务知识：
-{KNOWLEDGE_BASE}
+## 法律规则与商家规则
+
+{rules.load_rules()}
+
+## 售后处理 Skills
+
+{skills.load_skills()}
 """
 
 def execute_tool(tool_call: Any) -> str:
@@ -125,7 +131,7 @@ def agent_loop(
             post_hook_result = trigger_hooks("PostToolUse", tool_call, tool_result)
             if post_hook_result is not None:
                 tool_result = f"{tool_result}\n{post_hook_result}"
-            #     这里保留边界
+            #     这里保留边界，后面记得改
             messages.append(
                 {
                     "role": "tool",

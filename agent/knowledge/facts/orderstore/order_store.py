@@ -7,10 +7,10 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from knowledge.mock_orders import ORDERS as MOCK_ORDERS
+from .mock_orders import ORDERS as MOCK_ORDERS
 
 
-DATABASE_PATH = Path(__file__).with_name("orders.db")
+DATABASE_PATH = Path(__file__).parent.parent / "orders.db"
 
 
 def _initialize_order_store(connection: sqlite3.Connection) -> None:
@@ -123,47 +123,6 @@ def get_order(order_id: str) -> dict[str, Any] | None:
         ).fetchone()
 
     return dict(row) if row is not None else None
-
-
-def insert_order(order: dict[str, Any]) -> None:
-    """
-    向 SQLite 添加一笔订单。
-
-    调用方式：
-        insert_order(order)
-
-    输入字段：
-        order：包含当前订单表全部字段的订单字典。
-
-    输出字段：
-        无返回值；订单号重复时抛出 ValueError。
-    """
-
-    try:
-        with closing(_connect()) as connection:
-            connection.execute(
-                """
-                INSERT INTO orders (
-                    order_id,
-                    product_name,
-                    purchased_at,
-                    shipping_status,
-                    received_at,
-                    refund_status
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    order["order_id"],
-                    order["product_name"],
-                    order["purchased_at"],
-                    order["shipping_status"],
-                    order["received_at"],
-                    order["refund_status"],
-                ),
-            )
-            connection.commit()
-    except sqlite3.IntegrityError as error:
-        raise ValueError(f"订单 {order['order_id']} 已存在") from error
 
 
 def update_refund_status(

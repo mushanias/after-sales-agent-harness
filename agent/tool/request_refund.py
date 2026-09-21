@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from knowledge.order_store import update_refund_status
+from knowledge.facts import orderstore
 
 
 REFUND_REQUEST_TOOL = {
@@ -42,8 +42,8 @@ def request_refund(order_id: str) -> dict[str, Any]:
         message：失败原因，供模型向用户解释当前状态。
 
     当前边界：
-        当前通过 knowledge.order_store.update_refund_status 更新 SQLite；以后替换
-        数据来源时保持本函数的输入输出契约不变。当前不判断七天无理由资格。
+        当前通过 knowledge.facts.orderstore 更新 SQLite；以后替换数据来源时
+        保持本函数的输入输出契约不变。当前不判断七天无理由资格。
     """
 
     if not isinstance(order_id, str) or not order_id.strip():
@@ -54,7 +54,7 @@ def request_refund(order_id: str) -> dict[str, Any]:
         }
 
     normalized_order_id = order_id.strip()
-    order = update_refund_status(normalized_order_id, "申请中")
+    order = orderstore.update_refund_status(normalized_order_id, "申请中")
     if order is None:
         return {
             "ok": False,

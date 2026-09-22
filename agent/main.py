@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
-from typing import Any
 
+from context import SYSTEM_PROMPT, build_context
+from knowledge import rules, skills
 from loop import agent_loop
 from model import DEFAULT_MODEL, MODEL_POOL
 
@@ -27,7 +28,11 @@ def main() -> None:
         raise SystemExit(f"请先设置环境变量 {model.api_key_env}")
 
     client = OpenAI(api_key=api_key, base_url=model.base_url)
-    history: list[dict[str, Any]] = []
+    messages = build_context(
+        system_prompt=SYSTEM_PROMPT,
+        rules_context=rules.load_rules(),
+        skills_context=skills.load_skills(),
+    )
 
     print("售后处理 Agent：输入问题开始，输入 q 退出。")
     while True:
@@ -41,9 +46,9 @@ def main() -> None:
         if not query:
             continue
 
-        history.append({"role": "user", "content": query})
+        messages.append({"role": "user", "content": query})
 
-        content = agent_loop(client, model, history)
+        content = agent_loop(client, model, messages)
         if content:
             print(content)
 

@@ -1,3 +1,9 @@
+---
+name: seven-day-return-policy
+description: 说明网络购买 HiFi 耳机七天无理由退货的适用期限、拆封与商品完好判断、运费和退款阶段；用户咨询退货资格、试听拆封、商品完整性或退款到账时使用。
+category: policy
+---
+
 # 网络购买 HiFi 耳机七天无理由退货规则
 
 ## 适用范围

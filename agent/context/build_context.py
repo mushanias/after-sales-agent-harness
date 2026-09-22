@@ -7,13 +7,19 @@ from typing import Any
 
 def build_context(
     system_prompt: str,
-    rules_context: str,
-    skills_context: str,
+    skills_catalog: str,
 ) -> list[dict[str, Any]]:
-    """按职责组合系统提示、业务规则和处理技能，返回初始消息。"""
+    """组合固定系统提示和 Skill 短目录，返回初始消息。"""
 
     return [
         {"role": "system", "content": system_prompt},
-        {"role": "system", "content": f"业务规则：\n{rules_context}"},
-        {"role": "system", "content": f"处理 Skills：\n{skills_context}"},
+        {
+            "role": "system",
+            "content": (
+                "可用 Skills：\n"
+                f"{skills_catalog}\n\n"
+                "根据每项 Skill 的 description 判断是否适用于当前任务；"
+                "需要完整内容时调用 load_skill(name)。"
+            ),
+        },
     ]

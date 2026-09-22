@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 from context import SYSTEM_PROMPT, build_context
-from knowledge import rules, skills
+from knowledge import skill
 from loop import agent_loop
 from model import DEFAULT_MODEL, MODEL_POOL
 
@@ -30,8 +30,7 @@ def main() -> None:
     client = OpenAI(api_key=api_key, base_url=model.base_url)
     messages = build_context(
         system_prompt=SYSTEM_PROMPT,
-        rules_context=rules.load_rules(),
-        skills_context=skills.load_skills(),
+        skills_catalog=skill.skills_catalog(),
     )
 
     print("售后处理 Agent：输入问题开始，输入 q 退出。")

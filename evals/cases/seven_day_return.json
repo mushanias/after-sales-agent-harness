@@ -1,0 +1,324 @@
+{
+  "suite_id": "seven_day_return_v1",
+  "description": "天猫 HiFi 耳机七天无理由退货第一版评估集",
+  "fixed_date": "2026-09-21",
+  "sources": {
+    "tmall_seven_day": {
+      "title": "天猫七天无理由退换货",
+      "url": "https://www.tmall.com/wow/seller/act/seven-day",
+      "kind": "official_platform_rule"
+    },
+    "store_policy": {
+      "title": "声途 HiFi 店售后处理规则",
+      "path": "agent/knowledge/rules/store_policy.md",
+      "kind": "simulated_merchant_rule"
+    }
+  },
+  "cases": [
+    {
+      "id": "missing_order_id",
+      "title": "用户没有提供订单号",
+      "source_ids": ["tmall_seven_day"],
+      "initial_orders": [],
+      "messages": [
+        {"role": "user", "content": "这个耳机我不想要了，能退吗？"}
+      ],
+      "tool_approvals": {},
+      "expected": {
+        "tool_sequence": [],
+        "must_include_any": [["订单号"]],
+        "must_not_include": ["已经提交", "申请成功", "退款到账"]
+      }
+    },
+    {
+      "id": "order_not_found",
+      "title": "订单不存在",
+      "source_ids": ["tmall_seven_day"],
+      "initial_orders": [
+        {
+          "order_id": "EVAL-DECOY",
+          "product_name": "头戴式 HiFi 耳机",
+          "purchased_at": "2026-09-18",
+          "shipping_status": "已签收",
+          "received_at": "2026-09-19",
+          "refund_status": null
+        }
+      ],
+      "messages": [
+        {"role": "user", "content": "订单 EVAL-404 不想要了，帮我看看能不能退。"}
+      ],
+      "tool_approvals": {},
+      "expected": {
+        "tool_sequence": [
+          {"name": "lookup_order", "arguments": {"order_id": "EVAL-404"}}
+        ],
+        "must_include_any": [["没有找到", "未找到", "不存在"]],
+        "must_not_include": ["已经提交", "申请成功", "退款到账"]
+      }
+    },
+    {
+      "id": "in_transit_refund_request",
+      "title": "运输中订单要求退款",
+      "source_ids": ["tmall_seven_day", "store_policy"],
+      "initial_orders": [
+        {
+          "order_id": "EVAL-1001",
+          "product_name": "头戴式 HiFi 耳机",
+          "purchased_at": "2026-09-18",
+          "shipping_status": "已发货运输中",
+          "received_at": null,
+          "refund_status": null
+        }
+      ],
+      "messages": [
+        {"role": "user", "content": "订单 EVAL-1001 还在路上，我不想要了，直接帮我退款。"}
+      ],
+      "tool_approvals": {},
+      "expected": {
+        "tool_sequence": [
+          {"name": "lookup_order", "arguments": {"order_id": "EVAL-1001"}}
+        ],
+        "must_include_any": [["尚未签收", "未签收", "运输中"]],
+        "must_not_include": ["已经退款", "申请成功", "退款到账"]
+      }
+    },
+    {
+      "id": "eligible_consultation",
+      "title": "符合条件但用户只咨询资格",
+      "source_ids": ["tmall_seven_day", "store_policy"],
+      "initial_orders": [
+        {
+          "order_id": "EVAL-1002",
+          "product_name": "头戴式 HiFi 耳机",
+          "purchased_at": "2026-09-17",
+          "shipping_status": "已签收",
+          "received_at": "2026-09-19",
+          "refund_status": null
+        }
+      ],
+      "messages": [
+        {"role": "user", "content": "订单 EVAL-1002，包装没拆，商品和赠品都齐，能七天无理由退吗？"}
+      ],
+      "tool_approvals": {},
+      "expected": {
+        "tool_sequence": [
+          {"name": "lookup_order", "arguments": {"order_id": "EVAL-1002"}}
+        ],
+        "must_include_any": [["可以申请", "符合"], ["确认", "提交", "发起"]],
+        "must_not_include": ["已经提交", "申请成功", "退款到账"]
+      }
+    },
+    {
+      "id": "eligible_explicit_application",
+      "title": "符合条件并明确要求提交申请",
+      "source_ids": ["tmall_seven_day", "store_policy"],
+      "initial_orders": [
+        {
+          "order_id": "EVAL-1003",
+          "product_name": "头戴式 HiFi 耳机",
+          "purchased_at": "2026-09-17",
+          "shipping_status": "已签收",
+          "received_at": "2026-09-19",
+          "refund_status": null
+        }
+      ],
+      "messages": [
+        {"role": "user", "content": "订单 EVAL-1003，包装没拆，商品、配件和赠品都齐全。我确认要退，请帮我提交申请。"}
+      ],
+      "tool_approvals": {"request_refund": true},
+      "expected": {
+        "tool_sequence": [
+          {"name": "lookup_order", "arguments": {"order_id": "EVAL-1003"}},
+          {"name": "request_refund", "arguments": {"order_id": "EVAL-1003"}}
+        ],
+        "order_updates": {
+          "EVAL-1003": {"refund_status": "申请中"}
+        },
+        "must_include_any": [["申请中", "已提交", "已发起"]],
+        "must_not_include": ["已经到账", "退款完成"]
+      }
+    },
+    {
+      "id": "expired_return_window",
+      "title": "超过七天申请期限",
+      "source_ids": ["tmall_seven_day"],
+      "initial_orders": [
+        {
+          "order_id": "EVAL-1004",
+          "product_name": "开放式 HiFi 耳机",
+          "purchased_at": "2026-09-07",
+          "shipping_status": "已签收",
+          "received_at": "2026-09-10",
+          "refund_status": null
+        }
+      ],
+      "messages": [
+        {"role": "user", "content": "订单 EVAL-1004 没拆封，帮我申请七天无理由退款。"}
+      ],
+      "tool_approvals": {},
+      "expected": {
+        "tool_sequence": [
+          {"name": "lookup_order", "arguments": {"order_id": "EVAL-1004"}}
+        ],
+        "must_include_any": [["七天", "七日", "申请期限"], ["超过", "超出", "届满", "不符合", "无法发起"]],
+        "must_not_include": ["已经提交", "申请成功", "退款到账"]
+      }
+    },
+    {
+      "id": "refund_already_pending",
+      "title": "退款申请已经处理中",
+      "source_ids": ["tmall_seven_day", "store_policy"],
+      "initial_orders": [
+        {
+          "order_id": "EVAL-1005",
+          "product_name": "无线 HiFi 耳机",
+          "purchased_at": "2026-09-15",
+          "shipping_status": "已签收",
+          "received_at": "2026-09-17",
+          "refund_status": "申请中"
+        }
+      ],
+      "messages": [
+        {"role": "user", "content": "订单 EVAL-1005 再帮我提交一次退款。"}
+      ],
+      "tool_approvals": {},
+      "expected": {
+        "tool_sequence": [
+          {"name": "lookup_order", "arguments": {"order_id": "EVAL-1005"}}
+        ],
+        "must_include_any": [["申请中"]],
+        "must_not_include": ["再次提交成功", "退款到账"]
+      }
+    },
+    {
+      "id": "opened_overear_missing_condition",
+      "title": "头戴式耳机试听但商品状态信息不足",
+      "source_ids": ["store_policy"],
+      "initial_orders": [
+        {
+          "order_id": "EVAL-1006",
+          "product_name": "头戴式 HiFi 耳机",
+          "purchased_at": "2026-09-16",
+          "shipping_status": "已签收",
+          "received_at": "2026-09-18",
+          "refund_status": null
+        }
+      ],
+      "messages": [
+        {"role": "user", "content": "订单 EVAL-1006，我拆开试听了十分钟，现在想退。"}
+      ],
+      "tool_approvals": {},
+      "expected": {
+        "tool_sequence": [
+          {"name": "lookup_order", "arguments": {"order_id": "EVAL-1006"}}
+        ],
+        "must_include_any": [["划痕", "污渍", "异味", "使用痕迹"], ["包装", "配件", "赠品"]],
+        "must_not_include": ["已经提交", "申请成功", "退款到账"]
+      }
+    },
+    {
+      "id": "inear_confirmation_unknown",
+      "title": "入耳式耳塞拆封且购买确认记录未知",
+      "source_ids": ["store_policy"],
+      "initial_orders": [
+        {
+          "order_id": "EVAL-1007",
+          "product_name": "入耳式 HiFi 耳机",
+          "purchased_at": "2026-09-17",
+          "shipping_status": "已签收",
+          "received_at": "2026-09-19",
+          "refund_status": null
+        }
+      ],
+      "messages": [
+        {"role": "user", "content": "订单 EVAL-1007，我把一次性密封耳塞拆了，不记得购买时有没有勾选提示，帮我退。"}
+      ],
+      "tool_approvals": {},
+      "expected": {
+        "tool_sequence": [
+          {"name": "lookup_order", "arguments": {"order_id": "EVAL-1007"}}
+        ],
+        "must_include_any": [["人工", "核实"], ["提示", "勾选", "确认记录"]],
+        "must_not_include": ["已经提交", "申请成功", "一定不能退"]
+      }
+    },
+    {
+      "id": "quality_issue_not_no_reason",
+      "title": "质量问题不能调用无理由退款工具",
+      "source_ids": ["store_policy"],
+      "initial_orders": [
+        {
+          "order_id": "EVAL-1008",
+          "product_name": "头戴式 HiFi 耳机",
+          "purchased_at": "2026-09-10",
+          "shipping_status": "已签收",
+          "received_at": "2026-09-12",
+          "refund_status": null
+        }
+      ],
+      "messages": [
+        {"role": "user", "content": "订单 EVAL-1008 左耳完全没声音，帮我退款。"}
+      ],
+      "tool_approvals": {},
+      "expected": {
+        "tool_sequence": [
+          {"name": "lookup_order", "arguments": {"order_id": "EVAL-1008"}}
+        ],
+        "must_include_any": [["质量问题", "故障"], ["检测", "换货", "人工"]],
+        "must_not_include": ["已经提交退款", "退款到账"]
+      }
+    },
+    {
+      "id": "user_date_conflicts_with_order",
+      "title": "用户描述的签收日期与订单系统冲突",
+      "source_ids": ["tmall_seven_day", "store_policy"],
+      "initial_orders": [
+        {
+          "order_id": "EVAL-1009",
+          "product_name": "监听式 HiFi 耳机",
+          "purchased_at": "2026-09-08",
+          "shipping_status": "已签收",
+          "received_at": "2026-09-10",
+          "refund_status": null
+        }
+      ],
+      "messages": [
+        {"role": "user", "content": "订单 EVAL-1009 是昨天才签收的，没拆封，直接帮我申请退款。"}
+      ],
+      "tool_approvals": {},
+      "expected": {
+        "tool_sequence": [
+          {"name": "lookup_order", "arguments": {"order_id": "EVAL-1009"}}
+        ],
+        "must_include_any": [["订单", "系统", "查询"], ["七天", "七日", "申请期限"], ["超过", "超出", "届满", "不符合", "无法发起"]],
+        "must_not_include": ["已经提交", "申请成功", "退款到账"]
+      }
+    },
+    {
+      "id": "pending_status_is_not_arrival",
+      "title": "申请中不能描述为退款到账",
+      "source_ids": ["tmall_seven_day", "store_policy"],
+      "initial_orders": [
+        {
+          "order_id": "EVAL-1010",
+          "product_name": "开放式 HiFi 耳机",
+          "purchased_at": "2026-09-15",
+          "shipping_status": "已签收",
+          "received_at": "2026-09-17",
+          "refund_status": "申请中"
+        }
+      ],
+      "messages": [
+        {"role": "user", "content": "订单 EVAL-1010 的退款是不是已经到账了？"}
+      ],
+      "tool_approvals": {},
+      "expected": {
+        "tool_sequence": [
+          {"name": "lookup_order", "arguments": {"order_id": "EVAL-1010"}}
+        ],
+        "must_include_any": [["申请中"]],
+        "must_not_include": ["已经到账", "退款完成"]
+      }
+    }
+  ]
+}

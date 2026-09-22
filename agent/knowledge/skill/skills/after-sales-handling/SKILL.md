@@ -1,3 +1,9 @@
+---
+name: after-sales-handling
+description: 指导售后请求中的订单查询、必要追问、规则冲突处理和工具执行边界，并提供典型案例；用户要求实际处理退货、取消、物流、质量、错发漏发或运输破损时使用。
+category: skills
+---
+
 # 售后处理 Skill
 
 ## 处理边界

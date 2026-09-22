@@ -79,13 +79,15 @@ knowledge/
 ## 4 Skill 加载边界
 
 项目代码不负责判断当前问题应该使用哪个 Skill，也不维护关键词与 Skill 的路由关系。
-每个 Skill 必须通过自己的元数据说明适用范围，模型读取短目录后自行判断并调用
-`load_skill`；加载器只负责按名称返回对应的完整内容。
+每个 Skill 必须通过自己的元数据说明适用范围。模型先调用 `list_skills` 获取短目录，
+自行判断后再调用 `load_skill`；完整 Skill 不由 `build_context` 提前注入。
 
 每个 Skill 对外提供两部分：
 
-1. 短目录信息：`name`、`description`、`category`。
-2. 完整 Skill：需要时由 `load_skill(name)` 加载的具体规则或处理指导。
+1. `list_skills` 暴露短目录信息：`name`、`description`、`category`。
+2. `load_skill(name)` 加载对应的完整规则或处理指导。
 
 其中 `description` 必须同时说明“这个 Skill 提供什么”和“什么情况下应该使用”；
 `category` 用于区分政策规则 `policy` 与处理指导 `skills`，不参与代码路由。
+两个能力都属于工具层；`knowledge/skill` 只保存带元数据的 Markdown，不实现加载逻辑。
+避免重复扫描是工具层需要保护的边界；当前规模只共享模块首次扫描的结果，不为此增加独立类或额外分层。

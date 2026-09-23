@@ -7,7 +7,14 @@ from typing import Any
 
 def build_context(
     system_prompt: str,
+    skills: str,
 ) -> list[dict[str, Any]]:
-    """使用固定系统提示构造初始消息。"""
+    """按职责组合系统提示和 Skill 短目录。"""
 
-    return [{"role": "system", "content": system_prompt}]
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "system",
+            "content": f"可用 Skills 短目录：\n{skills}",
+        },
+    ]

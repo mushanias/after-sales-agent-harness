@@ -11,7 +11,6 @@ class Permissions(str, Enum):
 
 # 工具名 → 权限等级。未注册的工具按 DENY 处理。
 TOOL_PERMISSIONS: dict[str, Permissions] = {
-    "list_skills": Permissions.ALLOW,
     "load_skill": Permissions.ALLOW,
     "lookup_order": Permissions.ALLOW,
     "request_refund": Permissions.ASK,

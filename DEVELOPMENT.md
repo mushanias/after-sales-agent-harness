@@ -27,7 +27,6 @@
 我们统一在init中通过工具函数注册
 
 ## day 2
-今天跑通了闭环
 
 ## 1
 我们把loop摘了个干净，全部通过hook和中间件统一管理，hook使用trigger_hooks（）调用
@@ -76,18 +75,11 @@ knowledge/
 ## 3
 我们现在使用history作为变量，context提供mes
 
-## 4 Skill 加载边界
+## 4 Skill 
+skill自己通过注册函数注册，统一作为文本通过skill字段提交给context build
 
-项目代码不负责判断当前问题应该使用哪个 Skill，也不维护关键词与 Skill 的路由关系。
-每个 Skill 必须通过自己的元数据说明适用范围。模型先调用 `list_skills` 获取短目录，
-自行判断后再调用 `load_skill`；完整 Skill 不由 `build_context` 提前注入。
+## day 5
 
-每个 Skill 对外提供两部分：
-
-1. `list_skills` 暴露短目录信息：`name`、`description`、`category`。
-2. `load_skill(name)` 加载对应的完整规则或处理指导。
-
-其中 `description` 必须同时说明“这个 Skill 提供什么”和“什么情况下应该使用”；
-`category` 用于区分政策规则 `policy` 与处理指导 `skills`，不参与代码路由。
-两个能力都属于工具层；`knowledge/skill` 只保存带元数据的 Markdown，不实现加载逻辑。
-避免重复扫描是工具层需要保护的边界；当前规模只共享模块首次扫描的结果，不为此增加独立类或额外分层。
+## 1
+今天做subagent，我们的界限是，读取大量信息、调用多次工具时，不污染主对话上下文
+父agent决定，让subagent调用什么工具做什么，然后sub返回结果

@@ -334,6 +334,7 @@ def run_case(
 
     agent_loop_module = importlib.import_module("loop.agent_loop")
     context_module = importlib.import_module("context")
+    skill_knowledge = importlib.import_module("knowledge.skill")
     order_store = importlib.import_module(
         "knowledge.facts.orderstore.order_store"
     )
@@ -347,6 +348,7 @@ def run_case(
             context_module.SYSTEM_PROMPT,
             fixed_date,
         ),
+        skills=skill_knowledge.skills_catalog(),
     )
     messages.extend(json.loads(json.dumps(case["messages"], ensure_ascii=False)))
     logs = io.StringIO()

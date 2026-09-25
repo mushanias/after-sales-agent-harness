@@ -84,7 +84,7 @@ def agent_loop(
         )
         response_message = response.choices[0].message
         trigger_hooks("PostModelResponse", response_message)
-        messages.append(response_message.model_dump(exclude_none=True))
+        messages.append({"role": "assistant", "content": response_message.model_dump(exclude_none=True)})
 
         tool_calls = response_message.tool_calls or []
         if not tool_calls:

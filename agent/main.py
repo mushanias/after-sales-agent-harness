@@ -31,6 +31,7 @@ def main() -> None:
     messages = build_context(
         system_prompt=SYSTEM_PROMPT,
         skills=skill.skills_catalog(),
+    #     skill提供短目录，但是这里没有暴露，使用相应函数调用
     )
 
     print("售后处理 Agent：输入问题开始，输入 q 退出。")

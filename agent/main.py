@@ -8,6 +8,7 @@ from context import SYSTEM_PROMPT, build_context
 from knowledge import skill
 from loop import agent_loop
 from model import DEFAULT_MODEL, MODEL_POOL
+from tool import configure_tools
 
 
 def main() -> None:
@@ -28,6 +29,7 @@ def main() -> None:
         raise SystemExit(f"请先设置环境变量 {model.api_key_env}")
 
     client = OpenAI(api_key=api_key, base_url=model.base_url)
+    configure_tools(client, model)
     messages = build_context(
         system_prompt=SYSTEM_PROMPT,
         skills=skill.skills_catalog(),

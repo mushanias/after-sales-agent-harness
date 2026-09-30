@@ -333,7 +333,7 @@ def run_case(
     """在临时数据库中运行一个真实 Agent 案例并生成结果。"""
 
     agent_loop_module = importlib.import_module("loop.agent_loop")
-    context_module = importlib.import_module("context")
+    agent_main = importlib.import_module("main")
     session_module = importlib.import_module("session")
     skill_knowledge = importlib.import_module("knowledge.skill")
     order_store = importlib.import_module(
@@ -346,7 +346,7 @@ def run_case(
     trace: list[dict[str, Any]] = []
     session = session_module.Session(
         system_prompt=replace_prompt_date(
-            context_module.SYSTEM_PROMPT,
+            agent_main.SYSTEM_PROMPT,
             fixed_date,
         ),
         skills=skill_knowledge.skills_catalog(),
@@ -644,9 +644,9 @@ def main() -> int:
         path.read_text(encoding="utf-8")
         for path in sorted((AGENT_ROOT / "knowledge").rglob("*.md"))
     )
-    context_module = importlib.import_module("context")
+    agent_main = importlib.import_module("main")
     evaluated_system_prompt = replace_prompt_date(
-        context_module.SYSTEM_PROMPT,
+        agent_main.SYSTEM_PROMPT,
         suite["fixed_date"],
     )
     report = {

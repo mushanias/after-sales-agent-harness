@@ -334,6 +334,7 @@ def run_case(
 
     agent_loop_module = importlib.import_module("loop.agent_loop")
     context_module = importlib.import_module("context")
+    session_module = importlib.import_module("session")
     skill_knowledge = importlib.import_module("knowledge.skill")
     order_store = importlib.import_module(
         "knowledge.facts.orderstore.order_store"
@@ -343,14 +344,22 @@ def run_case(
     original_database_path = order_store.DATABASE_PATH
     original_middleware = agent_loop_module.approval_middleware
     trace: list[dict[str, Any]] = []
-    messages = context_module.build_context(
+    session = session_module.Session(
         system_prompt=replace_prompt_date(
             context_module.SYSTEM_PROMPT,
             fixed_date,
         ),
         skills=skill_knowledge.skills_catalog(),
     )
-    messages.extend(json.loads(json.dumps(case["messages"], ensure_ascii=False)))
+    for message in case["messages"]:
+        if message["role"] == "user":
+            session.add_user(message["content"])
+        elif message["role"] == "assistant":
+            session.add_assistant(message)
+        elif message["role"] == "tool":
+            session.add_tool_result(message["tool_call_id"], message["content"])
+        else:
+            raise ValueError(f"评估案例包含不支持的消息角色: {message['role']}")
     logs = io.StringIO()
     response_text = ""
     error: str | None = None
@@ -375,7 +384,7 @@ def run_case(
                     agent_loop_module.agent_loop(
                         limited_client,
                         model,
-                        messages,
+                        session,
                     )
                     or ""
                 )

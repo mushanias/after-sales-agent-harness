@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 
-from context import SYSTEM_PROMPT, build_context
+from context import SYSTEM_PROMPT
 from knowledge import skill
 from loop import agent_loop
 from model import DEFAULT_MODEL, MODEL_POOL
+from session import Session
 from tool import configure_tools
 
 
@@ -30,10 +31,9 @@ def main() -> None:
 
     client = OpenAI(api_key=api_key, base_url=model.base_url)
     configure_tools(client, model)
-    messages = build_context(
+    session = Session(
         system_prompt=SYSTEM_PROMPT,
         skills=skill.skills_catalog(),
-    #     skill提供短目录，但是这里没有暴露，使用相应函数调用
     )
 
     print("售后处理 Agent：输入问题开始，输入 q 退出。")
@@ -48,9 +48,9 @@ def main() -> None:
         if not query:
             continue
 
-        messages.append({"role": "user", "content": query})
+        session.add_user(query)
 
-        content = agent_loop(client, model, messages)
+        content = agent_loop(client, model, session)
         if content:
             print(content)
 

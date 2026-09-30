@@ -8,6 +8,7 @@ from typing import Any
 from hooks import trigger_hooks
 from middleware import approval_middleware
 from model import ModelConfig
+from session import Session
 from tool import TOOL_HANDLERS, TOOLS
 
 
@@ -71,20 +72,20 @@ def execute_tool(tool_call: Any) -> str:
 def agent_loop(
     client: Any,
     model: ModelConfig,
-    messages: list[dict[str, Any]],
+    session: Session,
 ) -> str | None:
-    """持续执行模型请求的工具，直到模型决定直接回复。"""
+    """从会话读取最新上下文并记录回复、工具结果，直到模型直接回复。"""
 
     while True:
         response = client.chat.completions.create(
             model=model.model_id,
-            messages=messages,
+            messages=session.build_context(),
             tools=TOOLS,
             max_tokens=8000,
         )
         response_message = response.choices[0].message
         trigger_hooks("PostModelResponse", response_message)
-        messages.append(response_message.model_dump(exclude_none=True))
+        session.add_assistant(response_message.model_dump(exclude_none=True))
 
         tool_calls = response_message.tool_calls or []
         if not tool_calls:
@@ -99,11 +100,4 @@ def agent_loop(
             post_hook_result = trigger_hooks("PostToolUse", tool_call, tool_result)
             if post_hook_result is not None:
                 tool_result = f"{tool_result}\n{post_hook_result}"
-            #     这里保留边界，后面记得改
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": tool_result,
-                }
-            )
+            session.add_tool_result(tool_call.id, tool_result)

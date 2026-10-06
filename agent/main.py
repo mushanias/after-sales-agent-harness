@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from datetime import date
 
+from compact import WindowCompactor
 from knowledge import skill
 from loop import agent_loop
 from model import DEFAULT_MODEL, MODEL_POOL
@@ -55,6 +56,7 @@ def main() -> None:
     session = Session(
         system_prompt=SYSTEM_PROMPT,
         skills=skill.skills_catalog(),
+        compactor=WindowCompactor(),
     )
 
     print("售后处理 Agent：输入问题开始，输入 q 退出。")
@@ -70,6 +72,7 @@ def main() -> None:
             continue
 
         session.add_user(query)
+        session.compact_if_needed()
 
         content = agent_loop(client, model, session)
         if content:

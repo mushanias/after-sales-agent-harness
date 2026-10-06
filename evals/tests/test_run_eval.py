@@ -174,6 +174,51 @@ class EvalRunnerTests(unittest.TestCase):
             [call.args[0] for call in hooks.call_args_list],
         )
 
+    def test_loop_uses_compacted_context_and_receives_new_tool_results(self) -> None:
+        """裁剪后的上下文进入真实 Loop，新工具结果仍进入下一次模拟模型请求。"""
+
+        from compact import WindowCompactor
+        from session import Session
+
+        loop_module = importlib.import_module("loop.agent_loop")
+        session = Session("固定说明", "技能目录", WindowCompactor(max_chars=1))
+        for turn in range(1, 6):
+            session.add_user(f"第 {turn} 轮问题")
+            session.add_assistant({"role": "assistant", "content": "原始回答" * 300})
+        session.add_user("查询两个订单")
+        original_history = session.history
+        session.compact_if_needed()
+        expected_context = session.build_context()
+        self.assertEqual(1, len(session.compaction_results))
+        tool_calls = [
+            FakeToolCall("new-1", "lookup_order", {"order_id": "1"}),
+            FakeToolCall("new-2", "lookup_order", {"order_id": "2"}),
+        ]
+        completions = FakeCompletions([
+            FakeMessage(tool_calls=tool_calls),
+            FakeMessage(content="两个订单已查询"),
+        ])
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        model = SimpleNamespace(model_id="fake-model")
+
+        with (
+            patch.object(loop_module, "approval_middleware", side_effect=["订单一", "订单二"]),
+            patch.object(loop_module, "trigger_hooks", return_value=None),
+        ):
+            answer = loop_module.agent_loop(client, model, session)
+
+        self.assertEqual("两个订单已查询", answer)
+        self.assertEqual(expected_context, completions.contexts[0])
+        self.assertEqual(expected_context, completions.contexts[1][:-3])
+        self.assertEqual(
+            ["assistant", "tool", "tool"],
+            [message["role"] for message in completions.contexts[1][-3:]],
+        )
+        self.assertEqual("订单一", completions.contexts[1][-2]["content"])
+        self.assertEqual("订单二", completions.contexts[1][-1]["content"])
+        self.assertEqual(original_history, session.history[:len(original_history)])
+        self.assertEqual(answer, session.history[-1]["content"])
+
     def test_live_path_uses_temporary_database(self) -> None:
         """真实 Loop 和工具执行不得修改项目订单数据库。"""
 

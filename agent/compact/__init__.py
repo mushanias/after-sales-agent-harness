@@ -1,5 +1,6 @@
-"""当前会话消息压缩的公开入口。"""
+"""压缩契约与轻量历史裁剪策略的公开入口。"""
 
-from .context_compactor import CompactionSnapshot, ContextCompactor
+from .contracts import CompactionResult, Compactor
+from .window_compactor import WindowCompactor
 
-__all__ = ["CompactionSnapshot", "ContextCompactor"]
+__all__ = ["CompactionResult", "Compactor", "WindowCompactor"]

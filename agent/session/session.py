@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from compact import CompactionResult, Compactor
+
 
 class SessionInputs(BaseModel):
     """保存系统 prompt 和 skills 短目录；短目录允许为空。"""
@@ -54,15 +56,20 @@ class ToolResult(BaseModel):
 
 class Session:
     """
-    独立管理一个会话的输入与历史，不调用模型、执行工具或压缩历史。
+    独立管理一个会话的输入与历史，通过注入的压缩器获取并记录压缩结果。
 
     system_prompt、skills 单独保存，history 只包含 user、assistant 和 tool。
     写入入口分别校验消息及工具配对关系；失败时保持已有历史不变。
-    当前仅保存在内存中，build_context 按需生成独立的模型上下文。
+    完整历史只追加；build_context 应用最新压缩结果，按需生成独立上下文。
     """
 
-    def __init__(self, system_prompt: str, skills: str) -> None:
-        """校验系统输入，并为本会话创建独立的历史与待返回工具集合。"""
+    def __init__(
+        self,
+        system_prompt: str,
+        skills: str,
+        compactor: Compactor | None = None,
+    ) -> None:
+        """保存系统输入和可选压缩器，创建本会话独立的历史与结果记录。"""
 
         self._inputs = SessionInputs(system_prompt=system_prompt, skills=skills)
         if not self._inputs.system_prompt.strip():
@@ -70,6 +77,8 @@ class Session:
 
         self._history: list[dict[str, Any]] = []
         self._pending_tool_calls: set[str] = set()
+        self._compactor = compactor
+        self._compaction_results: list[CompactionResult] = []
 
     @property
     def system_prompt(self) -> str:
@@ -89,12 +98,57 @@ class Session:
 
         return deepcopy(self._history)
 
+    @property
+    def compaction_results(self) -> tuple[CompactionResult, ...]:
+        """读取压缩结果记录的独立副本；只有最新结果用于当前上下文。"""
+
+        return tuple(deepcopy(self._compaction_results))
+
+    def compact_if_needed(self) -> None:
+        """把历史副本交给压缩器，并在完整返回后保存结果，不改写原文。"""
+
+        if self._compactor is None:
+            return
+        if self._pending_tool_calls:
+            raise ValueError("工具结果尚未全部返回，不能检查压缩")
+
+        current_result = (
+            deepcopy(self._compaction_results[-1])
+            if self._compaction_results
+            else None
+        )
+        result = self._compactor.compact_if_needed(
+            history=self.history,
+            current_result=current_result,
+        )
+        if result is not None:
+            # 可变的 Pydantic 实例也重新校验；全部成功后再记录，避免保存半个结果。
+            payload = result.model_dump() if isinstance(result, CompactionResult) else result
+            validated_result = CompactionResult.model_validate(payload)
+            self._validate_compaction(validated_result)
+            self._compaction_results.append(validated_result.model_copy(deep=True))
+
+    def _validate_compaction(self, result: CompactionResult) -> None:
+        """首版只允许用说明消息替代完整旧轮次，保护当前请求和工具配对。"""
+
+        if not 0 <= result.start < result.end < len(self._history):
+            raise ValueError("压缩范围必须位于历史内，并保留当前用户轮次")
+        if (
+            self._history[result.start]["role"] != "user"
+            or self._history[result.end]["role"] != "user"
+        ):
+            raise ValueError("压缩范围必须从一个 user 轮次开始，到另一个 user 轮次之前结束")
+        for replacement in result.messages:
+            message = AssistantMessage.model_validate(replacement)
+            if message.tool_calls:
+                raise ValueError("压缩说明消息不能引入新的工具调用")
+
     def build_context(self) -> list[dict[str, Any]]:
         """
-        组装系统 prompt、skills 短目录和最新历史，返回独立的模型消息列表。
+        组装系统 prompt、skills 短目录和当前历史窗口，返回独立的模型消息列表。
 
         工具结果必须全部到齐，避免将无法配对的消息链发送给模型。
-        每次组装都读取当前历史，组装结果不写回历史。
+        每次组装都读取最新完整历史与压缩结果，组装结果不写回历史。
         """
 
         if self._pending_tool_calls:
@@ -107,8 +161,16 @@ class Session:
                 "content": f"可用 Skills 短目录：\n{self.skills}",
             },
         ]
-        # history 返回深拷贝；后续筛选或压缩上下文不会连带改写原始历史。
-        return system_messages + self.history
+        history = self.history
+        if self._compaction_results:
+            result = self._compaction_results[-1]
+            # 只替换上下文副本；新追加的回复和工具结果仍来自完整历史的尾部。
+            history = (
+                history[:result.start]
+                + deepcopy(result.messages)
+                + history[result.end:]
+            )
+        return system_messages + history
 
     def add_user(self, content: str) -> None:
         """上一轮有最终回复后，记录新的用户输入。"""

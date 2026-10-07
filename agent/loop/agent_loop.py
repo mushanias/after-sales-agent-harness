@@ -77,6 +77,8 @@ def agent_loop(
     """从会话读取最新上下文并记录回复、工具结果，直到模型直接回复。"""
 
     while True:
+        # 每次请求前检查，覆盖本轮工具返回大段文本的情况。
+        session.compact_if_needed()
         response = client.chat.completions.create(
             model=model.model_id,
             messages=session.build_context(),

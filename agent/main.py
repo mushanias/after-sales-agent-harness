@@ -72,7 +72,6 @@ def main() -> None:
             continue
 
         session.add_user(query)
-        session.compact_if_needed()
 
         content = agent_loop(client, model, session)
         if content:

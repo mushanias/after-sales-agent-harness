@@ -219,6 +219,52 @@ class EvalRunnerTests(unittest.TestCase):
         self.assertEqual(original_history, session.history[:len(original_history)])
         self.assertEqual(answer, session.history[-1]["content"])
 
+    def test_loop_shortens_large_tool_result_before_next_model_request(self) -> None:
+        """首轮工具返回大文本后立即缩短，后续轮次复用结果且不再次执行工具。"""
+
+        from compact import WindowCompactor
+        from session import Session
+
+        loop_module = importlib.import_module("loop.agent_loop")
+        session = Session("固定说明", "技能目录", WindowCompactor(max_tool_result_chars=512))
+        session.add_user("读取规则并提交模拟退款")
+        original_text = "规则开头。" + "演示正文。" * 2000 + "规则结尾。"
+        short_result = "模拟退款已提交，编号 RF001"
+        tool_calls = [
+            FakeToolCall("large-result", "load_skill", {"name": "demo"}),
+            FakeToolCall("refund-result", "request_refund", {"order_id": "demo"}),
+        ]
+        completions = FakeCompletions([
+            FakeMessage(tool_calls=tool_calls),
+            FakeMessage(content="模拟处理完毕"),
+            FakeMessage(content="下一轮解释完毕"),
+        ])
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        model = SimpleNamespace(model_id="fake-model")
+
+        with (
+            patch.object(
+                loop_module, "approval_middleware", side_effect=[original_text, short_result]
+            ) as approval,
+            patch.object(loop_module, "trigger_hooks", return_value=None),
+        ):
+            self.assertEqual("模拟处理完毕", loop_module.agent_loop(client, model, session))
+            session.add_user("继续解释")
+            self.assertEqual("下一轮解释完毕", loop_module.agent_loop(client, model, session))
+
+        shortened = session.tool_compaction_results[2]
+        self.assertEqual(512, len(shortened))
+        self.assertEqual(original_text, session.history[2]["content"])
+        self.assertEqual((), session.compaction_results)
+        self.assertEqual(2, approval.call_count)
+        self.assertEqual(3, len(completions.contexts[0]))
+        for context in completions.contexts[1:]:
+            tool_messages = [message for message in context if message["role"] == "tool"]
+            self.assertEqual("large-result", tool_messages[0]["tool_call_id"])
+            self.assertEqual(shortened, tool_messages[0]["content"])
+            self.assertEqual(short_result, tool_messages[1]["content"])
+            self.assertEqual("refund-result", tool_messages[1]["tool_call_id"])
+
     def test_live_path_uses_temporary_database(self) -> None:
         """真实 Loop 和工具执行不得修改项目订单数据库。"""
 

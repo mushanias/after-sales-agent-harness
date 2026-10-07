@@ -60,6 +60,8 @@ class Session:
 
     system_prompt、skills 单独保存，history 只包含 user、assistant 和 tool。
     写入入口分别校验消息及工具配对关系；失败时保持已有历史不变。
+    压缩器选择省略范围和标记文本，Session 校验替换后的会话完整性。
+    整段裁剪记录与单条工具结果的短文本分开保存，原始历史始终完整。
     完整历史只追加；build_context 应用最新压缩结果，按需生成独立上下文。
     """
 
@@ -79,6 +81,7 @@ class Session:
         self._pending_tool_calls: set[str] = set()
         self._compactor = compactor
         self._compaction_results: list[CompactionResult] = []
+        self._tool_compaction_results: dict[int, str] = {}
 
     @property
     def system_prompt(self) -> str:
@@ -104,13 +107,35 @@ class Session:
 
         return tuple(deepcopy(self._compaction_results))
 
+    @property
+    def tool_compaction_results(self) -> dict[int, str]:
+        """读取单条工具结果的压缩记录副本：原始消息位置对应缩短后的正文。"""
+
+        return dict(self._tool_compaction_results)
+
     def compact_if_needed(self) -> None:
-        """把历史副本交给压缩器，并在完整返回后保存结果，不改写原文。"""
+        """先缩短单条工具文本，再检查历史裁剪；两类结果全部成功后保存。"""
 
         if self._compactor is None:
             return
         if self._pending_tool_calls:
             raise ValueError("工具结果尚未全部返回，不能检查压缩")
+
+        history = self.history
+        tool_results = dict(self._tool_compaction_results)
+        for index, message in enumerate(history):
+            if message["role"] != "tool":
+                continue
+            if index not in tool_results:
+                content = self._compactor.compact_tool_result(
+                    content=message["content"], history_index=index
+                )
+                if content is not None:
+                    tool_results[index] = ToolResult(
+                        tool_call_id=message["tool_call_id"], content=content
+                    ).content
+            if index in tool_results:
+                message["content"] = tool_results[index]
 
         current_result = (
             deepcopy(self._compaction_results[-1])
@@ -118,7 +143,7 @@ class Session:
             else None
         )
         result = self._compactor.compact_if_needed(
-            history=self.history,
+            history=history,
             current_result=current_result,
         )
         if result is not None:
@@ -126,22 +151,44 @@ class Session:
             payload = result.model_dump() if isinstance(result, CompactionResult) else result
             validated_result = CompactionResult.model_validate(payload)
             self._validate_compaction(validated_result)
-            self._compaction_results.append(validated_result.model_copy(deep=True))
+            validated_result = validated_result.model_copy(deep=True)
+
+        # 原文已经完整记录；压缩失败时不写入任何一类新结果。
+        self._tool_compaction_results = tool_results
+        if result is not None:
+            self._compaction_results.append(validated_result)
 
     def _validate_compaction(self, result: CompactionResult) -> None:
-        """首版只允许用说明消息替代完整旧轮次，保护当前请求和工具配对。"""
+        """校验替换范围和组装后的会话完整性，不限定具体裁剪策略。"""
 
-        if not 0 <= result.start < result.end < len(self._history):
-            raise ValueError("压缩范围必须位于历史内，并保留当前用户轮次")
-        if (
-            self._history[result.start]["role"] != "user"
-            or self._history[result.end]["role"] != "user"
-        ):
-            raise ValueError("压缩范围必须从一个 user 轮次开始，到另一个 user 轮次之前结束")
-        for replacement in result.messages:
-            message = AssistantMessage.model_validate(replacement)
-            if message.tool_calls:
-                raise ValueError("压缩说明消息不能引入新的工具调用")
+        if not 0 <= result.start < result.end <= len(self._history):
+            raise ValueError("压缩范围必须位于完整历史内")
+        current_user_index = next(
+            index for index in range(len(self._history) - 1, -1, -1)
+            if self._history[index]["role"] == "user"
+        )
+        if result.start <= current_user_index < result.end:
+            raise ValueError("压缩不能替换当前用户问题")
+
+        candidate = (
+            self._history[:result.start]
+            + [{"role": "assistant", "content": result.content}]
+            + self._history[result.end:]
+        )
+        # 标记不会引入工具调用，只检查省略原文后是否仍能完整配对。
+        pending_calls: set[str] = set()
+        for message in candidate:
+            if message["role"] == "tool":
+                call_id = message["tool_call_id"]
+                if call_id not in pending_calls:
+                    raise ValueError("压缩后的工具结果没有对应的待返回调用")
+                pending_calls.remove(call_id)
+                continue
+            if pending_calls:
+                raise ValueError("压缩后的工具结果尚未全部返回，不能接入其他消息")
+            pending_calls.update(call["id"] for call in message.get("tool_calls", []))
+        if pending_calls:
+            raise ValueError("压缩后的历史缺少工具结果")
 
     def build_context(self) -> list[dict[str, Any]]:
         """
@@ -162,12 +209,15 @@ class Session:
             },
         ]
         history = self.history
+        # 按原始位置替换正文，再裁剪轮次；role 和 tool_call_id 均来自原文。
+        for index, content in self._tool_compaction_results.items():
+            history[index]["content"] = content
         if self._compaction_results:
             result = self._compaction_results[-1]
             # 只替换上下文副本；新追加的回复和工具结果仍来自完整历史的尾部。
             history = (
                 history[:result.start]
-                + deepcopy(result.messages)
+                + [{"role": "assistant", "content": result.content}]
                 + history[result.end:]
             )
         return system_messages + history

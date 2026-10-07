@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class CompactionResult(BaseModel):
     """
-    记录原始 history 的替换范围、替代消息，以及供后续工具使用的归档路径。
+    记录原始 history 的省略范围、标记文本，以及供后续工具使用的归档路径。
 
     范围采用 [start, end)，对应完整 history 的消息位置；包含 start，不包含 end。
     archive_path 仅是连接点；当前不检查文件存在，也不实现归档读写。
@@ -17,7 +17,7 @@ class CompactionResult(BaseModel):
 
     start: int = Field(ge=0)
     end: int = Field(gt=0)
-    messages: list[dict[str, Any]] = Field(min_length=1)
+    content: str = Field(min_length=1)
     archive_path: str | None = Field(
         default=None,
         min_length=1,
@@ -34,7 +34,12 @@ class CompactionResult(BaseModel):
 
 
 class Compactor(Protocol):
-    """约定压缩器的一个入口；是否压缩以及如何压缩由具体策略决定。"""
+    """约定历史裁剪与单条工具结果缩短的入口，具体策略由压缩器决定。"""
+
+    def compact_tool_result(self, content: str, history_index: int) -> str | None:
+        """接收单条原始工具文本及其历史位置，返回缩短文本；None 表示保留原文。"""
+
+        ...
 
     def compact_if_needed(
         self,
@@ -42,9 +47,10 @@ class Compactor(Protocol):
         current_result: CompactionResult | None,
     ) -> CompactionResult | None:
         """
-        接收完整动态历史和上一次结果的副本，返回新的完整替换结果。
+        接收动态历史和上一次结果的副本，返回新的完整替换结果。
 
-        history 不包含系统 prompt 和 skills。返回 None 表示保持原状态；
+        history 保持原始消息位置，过长工具文本已替换为缩短版本，
+        不包含系统 prompt 和 skills。返回 None 表示保持原状态；
         结果由 Session 保存，本契约不实现摘要生成或模型调用。
         """
 

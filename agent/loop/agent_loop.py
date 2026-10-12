@@ -78,7 +78,7 @@ def agent_loop(
 
     while True:
         # 每次请求前检查，覆盖本轮工具返回大段文本的情况。
-        session.compact_if_needed()
+        session.run_compaction()
         response = client.chat.completions.create(
             model=model.model_id,
             messages=session.build_context(),

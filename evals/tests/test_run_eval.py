@@ -187,7 +187,7 @@ class EvalRunnerTests(unittest.TestCase):
             session.add_assistant({"role": "assistant", "content": "原始回答" * 300})
         session.add_user("查询两个订单")
         original_history = session.history
-        session.compact_if_needed()
+        session.run_compaction()
         expected_context = session.build_context()
         self.assertEqual(1, len(session.compaction_results))
         tool_calls = [
@@ -252,7 +252,7 @@ class EvalRunnerTests(unittest.TestCase):
             session.add_user("继续解释")
             self.assertEqual("下一轮解释完毕", loop_module.agent_loop(client, model, session))
 
-        shortened = session.tool_compaction_results[2]
+        shortened = session.shortened_tool_texts[2]
         self.assertEqual(512, len(shortened))
         self.assertEqual(original_text, session.history[2]["content"])
         self.assertEqual((), session.compaction_results)

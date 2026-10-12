@@ -18,7 +18,7 @@ class TodoItem(BaseModel):
     """描述模型写入当前计划的一项任务。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-
+    # basemodel模型的配置,不可有多余字段,创建后不可修改
     content: str
     status: TodoStatus
 

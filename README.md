@@ -170,7 +170,7 @@ assistant：根据查询结果解释订单状态
 
 代码顺序如下：
 
-1. `session.compact_if_needed()` 检查单条工具文本和历史窗口。
+1. `session.run_compaction()` 检查单条工具文本和历史窗口。
 2. `session.build_context()` 返回本次模型消息。
 3. Loop 调用 `client.chat.completions.create(...)`，把 `messages` 和 `tools=TOOLS` 一起交给模型。
 4. 响应到达后触发 `PostModelResponse`，然后通过 `session.add_assistant(...)` 保存模型消息。
@@ -195,7 +195,7 @@ Session 内部保留以下关系：
 | `_pending_tool_calls` | 模型已经请求、尚未得到结果的工具调用 ID |
 | `_compactor` | 注入的压缩器；不传时不启用压缩 |
 | `_compaction_results` | 历次整段历史裁剪结果 |
-| `_tool_compaction_results` | 原始消息位置到缩短工具文本的映射 |
+| `_shortened_tool_texts` | 原始消息位置到缩短工具文本的映射 |
 
 这里的下划线表示内部字段。正常流程通过 `add_user()`、`add_assistant()`、`add_tool_result()` 写入，通过 `history` 等属性读取副本。
 
@@ -409,7 +409,7 @@ Todo 提醒按工具处理次数计数：连续三次没有调用 `todo_write` �
 主 Loop 每次调用模型前，执行：
 
 ```python
-session.compact_if_needed()
+session.run_compaction()
 messages = session.build_context()
 ```
 
@@ -465,7 +465,7 @@ compactor=WindowCompactor(
 
 ```text
 _history[2]["content"]：完整工具原文
-_tool_compaction_results[2]：开头片段 + 说明 + 结尾片段
+_shortened_tool_texts[2]：开头片段 + 说明 + 结尾片段
 ```
 
 组装上下文时，只替换这条工具消息的 `content`，保留它的 `role="tool"` 和 `tool_call_id`，仍对应原来的工具调用。
@@ -518,7 +518,7 @@ history[:start] + [{"role": "assistant", "content": marker}] + history[end:]
 | 内部字段 | 数据形式 | 对应的公开读取属性 | 上下文中的用法 |
 | --- | --- | --- | --- |
 | `_compaction_results` | `list[CompactionResult]` | `session.compaction_results`，返回记录副本组成的 tuple | 用最新记录把旧轮次替换成一条标记 |
-| `_tool_compaction_results` | `dict[int, str]` | `session.tool_compaction_results`，返回字典副本 | 按原始位置替换工具正文 |
+| `_shortened_tool_texts` | `dict[int, str]` | `session.shortened_tool_texts`，返回字典副本 | 按原始位置替换工具正文 |
 
 完整历史在第三个字段 `_history` 中，可以通过 `session.history` 读取副本。所有位置都对应这份只追加的历史，因此新消息追加后，旧记录的位置仍然稳定。
 
@@ -526,10 +526,22 @@ history[:start] + [{"role": "assistant", "content": marker}] + history[end:]
 
 ### 11.6 谁决定，谁校验，谁保存
 
+方法和属性按职责命名：
+
+| 所属对象 | 名称 | 职责 |
+| --- | --- | --- |
+| Session | `run_compaction()` | 组织按需压缩流程，委托压缩器计算，再校验并保存结果 |
+| Session | `shortened_tool_texts` | 读取已保存的工具短文本副本；这是 `@property` 属性，访问时不加括号，也不执行压缩 |
+| WindowCompactor | `shorten_tool_text(content, history_index)` | 返回单条工具正文的短文本；不需要截短时返回 `None` |
+| WindowCompactor | `plan_history_compaction(history, current_result)` | 返回历史裁剪方案；不需要裁剪时返回 `None`，不保存会话记录 |
+
+Session 持有压缩器对象，并调用它的方法。`Compactor(Protocol)` 声明压缩器必须提供的两个方法，`WindowCompactor` 实现这些方法；这不是 Session 对压缩器方法的继承或覆盖，也不是 Python 自带的默认方法。
+
 ```text
-Loop：准备下一次模型请求
+Loop：调用 session.run_compaction()
   → Session：取出历史和已有压缩记录的副本
-  → WindowCompactor：选择短文本与裁剪范围
+  → WindowCompactor.shorten_tool_text()：计算工具短文本
+  → WindowCompactor.plan_history_compaction()：计算历史裁剪方案
   → Session：校验并保存结果
   → Session：组装模型上下文
   → Loop：调用模型
@@ -559,7 +571,7 @@ Loop：准备下一次模型请求
 | 系统提示和 Skill 短目录 | Session 的 `_inputs` | 会话对象消失；下次启动重新构建 |
 | 主对话原始消息与完整工具结果 | Session 的 `_history` | 否，只有内存记录 |
 | 整段裁剪记录 | Session 的 `_compaction_results` | 否 |
-| 单条工具短文本 | Session 的 `_tool_compaction_results` | 否 |
+| 单条工具短文本 | Session 的 `_shortened_tool_texts` | 否 |
 | 当前 Todo 和 Hook 计数 | 工具或 Hook 模块的内存变量 | 否 |
 | 子 Agent 的中间消息 | 子任务函数里的独立列表 | 否，未提供保存或读取入口 |
 | 订单与退款状态 | `agent/knowledge/facts/orders.db` | 是，SQLite 文件 |

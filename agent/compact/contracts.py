@@ -34,20 +34,20 @@ class CompactionResult(BaseModel):
 
 
 class Compactor(Protocol):
-    """约定历史裁剪与单条工具结果缩短的入口，具体策略由压缩器决定。"""
-
-    def compact_tool_result(self, content: str, history_index: int) -> str | None:
+    """声明压缩器计算工具短文本与历史裁剪方案的方法契约，不提供默认实现。"""
+#这里用Protocol声明方便拓展
+    def shorten_tool_text(self, content: str, history_index: int) -> str | None:
         """接收单条原始工具文本及其历史位置，返回缩短文本；None 表示保留原文。"""
 
         ...
 
-    def compact_if_needed(
+    def plan_history_compaction(
         self,
         history: list[dict[str, Any]],
         current_result: CompactionResult | None,
     ) -> CompactionResult | None:
         """
-        接收动态历史和上一次结果的副本，返回新的完整替换结果。
+        接收动态历史和上一次结果的副本，计算并返回新的完整历史裁剪方案。
 
         history 保持原始消息位置，过长工具文本已替换为缩短版本，
         不包含系统 prompt 和 skills。返回 None 表示保持原状态；

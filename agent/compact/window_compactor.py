@@ -24,7 +24,7 @@ class WindowCompactor(BaseModel):
     # 给省略说明留出空间；预算包含首尾文本和说明本身。
     max_tool_result_chars: int = Field(default=4_000, ge=256)
 
-    def compact_tool_result(self, content: str, history_index: int) -> str | None:
+    def shorten_tool_text(self, content: str, history_index: int) -> str | None:
         """只缩短工具正文，返回首尾片段和说明；工具角色与调用 ID 由 Session 保留。"""
 
         if len(content) <= self.max_tool_result_chars:
@@ -41,12 +41,12 @@ class WindowCompactor(BaseModel):
         tail_chars = keep_chars - head_chars
         return content[:head_chars] + marker + content[-tail_chars:]
 
-    def compact_if_needed(
+    def plan_history_compaction(
         self,
         history: list[dict[str, Any]],
         current_result: CompactionResult | None,
     ) -> CompactionResult | None:
-        """检查当前工作窗口，必要时返回覆盖原始历史中段的完整替换结果。"""
+        """检查当前工作窗口，必要时返回历史中段的裁剪方案，不保存会话记录。"""
 
         # 首版只处理新用户轮次开始时的旧历史，不在单轮工具链中间裁剪。
         if not history or history[-1].get("role") != "user":

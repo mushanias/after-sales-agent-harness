@@ -81,7 +81,7 @@ class Session:
         self._pending_tool_calls: set[str] = set()
         self._compactor = compactor
         self._compaction_results: list[CompactionResult] = []
-        self._tool_compaction_results: dict[int, str] = {}
+        self._shortened_tool_texts: dict[int, str] = {}
 
     @property
     def system_prompt(self) -> str:
@@ -108,13 +108,13 @@ class Session:
         return tuple(deepcopy(self._compaction_results))
 
     @property
-    def tool_compaction_results(self) -> dict[int, str]:
-        """读取单条工具结果的压缩记录副本：原始消息位置对应缩短后的正文。"""
+    def shortened_tool_texts(self) -> dict[int, str]:
+        """读取已保存的工具短文本副本：原始消息位置对应缩短后的正文，不执行压缩。"""
 
-        return dict(self._tool_compaction_results)
+        return dict(self._shortened_tool_texts)
 
-    def compact_if_needed(self) -> None:
-        """先缩短单条工具文本，再检查历史裁剪；两类结果全部成功后保存。"""
+    def run_compaction(self) -> None:
+        """组织按需压缩流程：委托压缩器计算工具短文本和历史方案，校验后统一保存。"""
 
         if self._compactor is None:
             return
@@ -122,12 +122,12 @@ class Session:
             raise ValueError("工具结果尚未全部返回，不能检查压缩")
 
         history = self.history
-        tool_results = dict(self._tool_compaction_results)
+        tool_results = dict(self._shortened_tool_texts)
         for index, message in enumerate(history):
             if message["role"] != "tool":
                 continue
             if index not in tool_results:
-                content = self._compactor.compact_tool_result(
+                content = self._compactor.shorten_tool_text(
                     content=message["content"], history_index=index
                 )
                 if content is not None:
@@ -142,7 +142,7 @@ class Session:
             if self._compaction_results
             else None
         )
-        result = self._compactor.compact_if_needed(
+        result = self._compactor.plan_history_compaction(
             history=history,
             current_result=current_result,
         )
@@ -154,7 +154,7 @@ class Session:
             validated_result = validated_result.model_copy(deep=True)
 
         # 原文已经完整记录；压缩失败时不写入任何一类新结果。
-        self._tool_compaction_results = tool_results
+        self._shortened_tool_texts = tool_results
         if result is not None:
             self._compaction_results.append(validated_result)
 
@@ -210,7 +210,7 @@ class Session:
         ]
         history = self.history
         # 按原始位置替换正文，再裁剪轮次；role 和 tool_call_id 均来自原文。
-        for index, content in self._tool_compaction_results.items():
+        for index, content in self._shortened_tool_texts.items():
             history[index]["content"] = content
         if self._compaction_results:
             result = self._compaction_results[-1]

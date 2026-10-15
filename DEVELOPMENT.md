@@ -99,3 +99,30 @@ Agent 层：
 历史恢复不 replay 副作用工具
 业务层：
 副作用工具尽可能支持幂等
+
+## Session / Compactor 重构
+
+**场景**：每次调用模型前，需要根据会话历史检查是否压缩上下文。
+
+**问题**：原先 Session 同时管理会话数据和安排压缩步骤，更换压缩策略容易牵动 Session。
+
+**解决方案**：Session 管数据，Compactor 管压缩，Loop 决定调用时机。
+
+```python
+snapshot = session.compaction_snapshot()
+output = compactor.compact(snapshot)
+session.record_compaction(output)
+```
+
+Session 不再持有压缩器，原来的 `run_compaction()` 已移除。压缩器统一提供 `compact()`，内部决定工具结果截短和历史裁剪的顺序。Session 接收结果时完成校验，全部通过后一起保存，再由 `build_context()` 应用到上下文副本。
+
+后续维护按职责找位置：
+
+- **调整压缩策略**：改 `agent/compact/window_compactor.py`，或实现同样的 `compact()` 接口后在 `main` 中替换。
+- **调整数据管理与合法性规则**：改 `agent/session/session.py`。完整 history 只追加，压缩记录单独保存；不能破坏工具调用与结果的配对，也不能裁掉当前用户问题。
+- **调整调用时机**：改 `agent/loop/agent_loop.py`。当前在每次请求模型前调用，工具结果必须全部返回。
+- **调整输入输出**：改 `agent/compact/contracts.py` 并同步调用方。位置始终对应完整 history；输出的工具短文本映射包含需要保留的旧记录，`history_result=None` 表示沿用上一份历史裁剪结果。
+
+修改后重点验证：原文未被改写、会话互相隔离、非法结果不会造成部分写入。相关测试在 `evals/tests/test_session_compaction.py` 和 `evals/tests/test_run_eval.py`。
+
+本次只拆分职责，仍使用原有截短和裁剪策略；会话数据目前保存在内存中，尚未实现语义摘要和文件归档。

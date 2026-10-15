@@ -181,13 +181,14 @@ class EvalRunnerTests(unittest.TestCase):
         from session import Session
 
         loop_module = importlib.import_module("loop.agent_loop")
-        session = Session("固定说明", "技能目录", WindowCompactor(max_chars=1))
+        compactor = WindowCompactor(max_chars=1)
+        session = Session("固定说明", "技能目录")
         for turn in range(1, 6):
             session.add_user(f"第 {turn} 轮问题")
             session.add_assistant({"role": "assistant", "content": "原始回答" * 300})
         session.add_user("查询两个订单")
         original_history = session.history
-        session.run_compaction()
+        session.record_compaction(compactor.compact(session.compaction_snapshot()))
         expected_context = session.build_context()
         self.assertEqual(1, len(session.compaction_results))
         tool_calls = [
@@ -205,7 +206,7 @@ class EvalRunnerTests(unittest.TestCase):
             patch.object(loop_module, "approval_middleware", side_effect=["订单一", "订单二"]),
             patch.object(loop_module, "trigger_hooks", return_value=None),
         ):
-            answer = loop_module.agent_loop(client, model, session)
+            answer = loop_module.agent_loop(client, model, session, compactor)
 
         self.assertEqual("两个订单已查询", answer)
         self.assertEqual(expected_context, completions.contexts[0])
@@ -226,7 +227,8 @@ class EvalRunnerTests(unittest.TestCase):
         from session import Session
 
         loop_module = importlib.import_module("loop.agent_loop")
-        session = Session("固定说明", "技能目录", WindowCompactor(max_tool_result_chars=512))
+        compactor = WindowCompactor(max_tool_result_chars=512)
+        session = Session("固定说明", "技能目录")
         session.add_user("读取规则并提交模拟退款")
         original_text = "规则开头。" + "演示正文。" * 2000 + "规则结尾。"
         short_result = "模拟退款已提交，编号 RF001"
@@ -248,9 +250,9 @@ class EvalRunnerTests(unittest.TestCase):
             ) as approval,
             patch.object(loop_module, "trigger_hooks", return_value=None),
         ):
-            self.assertEqual("模拟处理完毕", loop_module.agent_loop(client, model, session))
+            self.assertEqual("模拟处理完毕", loop_module.agent_loop(client, model, session, compactor))
             session.add_user("继续解释")
-            self.assertEqual("下一轮解释完毕", loop_module.agent_loop(client, model, session))
+            self.assertEqual("下一轮解释完毕", loop_module.agent_loop(client, model, session, compactor))
 
         shortened = session.shortened_tool_texts[2]
         self.assertEqual(512, len(shortened))

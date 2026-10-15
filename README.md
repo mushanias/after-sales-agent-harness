@@ -88,7 +88,7 @@ python gui.py
 | 主循环 Loop | 调用模型、判断是否继续、经过权限检查执行工具、回填结果 | `agent/loop/agent_loop.py` |
 | Session | 保存原始消息和两种压缩记录，检查工具配对，组装上下文 | `agent/session/session.py` |
 | 压缩器 | 决定工具文本如何截短、历史何时裁剪和保留哪些轮次 | `agent/compact/window_compactor.py` |
-| 压缩结果契约 | 规定替换范围、标记内容和预留归档路径的字段 | `agent/compact/contracts.py` |
+| 压缩契约 | 规定输入快照、统一输出，以及历史替换范围和标记内容 | `agent/compact/contracts.py` |
 | 工具 | 提供订单查询、规则读取、退款申请、计划记录和子任务入口 | `agent/tool/` |
 | 订单存储 | 从 SQLite 读取和更新订单事实 | `agent/knowledge/facts/orderstore/order_store.py` |
 | Skill 知识 | 提供政策、店规和处理指导；按需读取全文 | `agent/knowledge/skill/` |
@@ -108,7 +108,7 @@ python gui.py
   → 读取当前模型需要的 API Key
   → 创建模型客户端 client
   → configure_tools(client, model) 绑定 task 工具
-  → 创建一个 Session，并传入 WindowCompactor
+  → 分别创建 Session 和 WindowCompactor，交给主 Loop
   → 进入命令行输入循环
 ```
 
@@ -118,7 +118,7 @@ python gui.py
 2. `main()` 从 `MODEL_POOL[DEFAULT_MODEL]` 取得模型名称、服务地址和密钥变量名。
 3. 使用这些配置创建 `OpenAI` 客户端。缺少依赖或密钥时，启动会给出提示并停止。
 4. 调用 `configure_tools(client, model)`。普通工具已经注册；`task` 需要共享客户端和模型，所以在此时绑定处理函数。
-5. 创建 Session，传入系统提示、Skill 短目录和 `WindowCompactor()`。
+5. 创建 Session，传入系统提示和 Skill 短目录；单独创建 `WindowCompactor()`，通过主 Loop 使用。
 6. 等待用户输入。退出指令结束程序；有效问题通过 `session.add_user(query)` 写入原始历史，然后进入主循环。
 
 系统提示包含店铺身份、当前日期、查询订单要求、知识使用方式和业务执行边界。日期在加载入口模块时生成，当前没有跨午夜自动刷新提示的逻辑。
@@ -170,7 +170,7 @@ assistant：根据查询结果解释订单状态
 
 代码顺序如下：
 
-1. `session.run_compaction()` 检查单条工具文本和历史窗口。
+1. Loop 读取 `session.compaction_snapshot()`，调用 `compactor.compact(snapshot)`，再由 `session.record_compaction(output)` 校验并保存结果。
 2. `session.build_context()` 返回本次模型消息。
 3. Loop 调用 `client.chat.completions.create(...)`，把 `messages` 和 `tools=TOOLS` 一起交给模型。
 4. 响应到达后触发 `PostModelResponse`，然后通过 `session.add_assistant(...)` 保存模型消息。
@@ -193,7 +193,6 @@ Session 内部保留以下关系：
 | `_inputs` | 系统提示和 Skill 短目录 |
 | `_history` | 只追加的完整动态消息：用户、模型和工具消息 |
 | `_pending_tool_calls` | 模型已经请求、尚未得到结果的工具调用 ID |
-| `_compactor` | 注入的压缩器；不传时不启用压缩 |
 | `_compaction_results` | 历次整段历史裁剪结果 |
 | `_shortened_tool_texts` | 原始消息位置到缩短工具文本的映射 |
 
@@ -409,11 +408,14 @@ Todo 提醒按工具处理次数计数：连续三次没有调用 `todo_write` �
 主 Loop 每次调用模型前，执行：
 
 ```python
-session.run_compaction()
+if compactor is not None:
+    snapshot = session.compaction_snapshot()
+    output = compactor.compact(snapshot)
+    session.record_compaction(output)
 messages = session.build_context()
 ```
 
-这样，刚返回的大工具结果会在下一次模型看到它之前得到处理。两项检查有固定顺序：
+这样，刚返回的大工具结果会在下一次模型看到它之前得到处理。Loop 只知道快照和结果，下面的处理顺序由 WindowCompactor 内部决定：
 
 ```text
 复制原始动态历史
@@ -441,7 +443,7 @@ messages = session.build_context()
 如果要调整策略参数，修改 `main()` 创建压缩器的位置即可，例如：
 
 ```python
-compactor=WindowCompactor(
+compactor = WindowCompactor(
     max_chars=20_000,
     keep_recent_turns=3,
     max_tool_result_chars=4_000,
@@ -488,7 +490,7 @@ _shortened_tool_texts[2]：开头片段 + 说明 + 结尾片段
 
 默认保留首轮和最近三轮，最近三轮包含当前问题。示例中的第 2、3 轮整段一起省略，工具请求、对应结果和最终回复不会只删掉其中一部分。
 
-压缩器返回一个 `CompactionResult`：
+统一输出的 `history_result` 字段保存一个 `CompactionResult`：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -509,7 +511,7 @@ history[:start] + [{"role": "assistant", "content": marker}] + history[end:]
 
 后续再次裁剪时，新结果仍指向完整原始历史的位置。当前上下文只应用最新一条结果，不把历次标记全部叠加进去，也不让被省略的原文同时重复进入上下文。
 
-压缩器在以下情况返回 `None`，表示保持已有裁剪状态：窗口未超限、正在单轮工具处理中、轮次数不足、没有更大的可省略范围，或者新标记没有让窗口变短。
+压缩器在以下情况将输出的 `history_result` 设为 `None`，表示保持已有裁剪状态：窗口未超限、正在单轮工具处理中、轮次数不足、没有更大的可省略范围，或者新标记没有让窗口变短。统一输出仍然携带工具短文本映射。
 
 ### 11.5 两个压缩储存字段
 
@@ -530,24 +532,25 @@ history[:start] + [{"role": "assistant", "content": marker}] + history[end:]
 
 | 所属对象 | 名称 | 职责 |
 | --- | --- | --- |
-| Session | `run_compaction()` | 组织按需压缩流程，委托压缩器计算，再校验并保存结果 |
+| Session | `compaction_snapshot()` | 返回原始历史、已有工具短文本和最新历史裁剪记录的独立副本 |
+| Session | `record_compaction(output)` | 校验并一起保存两类结果，不执行压缩 |
 | Session | `shortened_tool_texts` | 读取已保存的工具短文本副本；这是 `@property` 属性，访问时不加括号，也不执行压缩 |
-| WindowCompactor | `shorten_tool_text(content, history_index)` | 返回单条工具正文的短文本；不需要截短时返回 `None` |
-| WindowCompactor | `plan_history_compaction(history, current_result)` | 返回历史裁剪方案；不需要裁剪时返回 `None`，不保存会话记录 |
+| WindowCompactor | `compact(snapshot)` | 统一处理工具正文和历史窗口，返回 `CompactionOutput` |
 
-Session 持有压缩器对象，并调用它的方法。`Compactor(Protocol)` 声明压缩器必须提供的两个方法，`WindowCompactor` 实现这些方法；这不是 Session 对压缩器方法的继承或覆盖，也不是 Python 自带的默认方法。
+Session 不持有压缩器。`Compactor(Protocol)` 只约定一个 `compact()` 方法，Loop 按这个契约调用具体压缩器。`_shorten_tool_text()` 和 `_plan_history_compaction()` 是 WindowCompactor 的内部步骤，调用方不需要了解它们。
+
+`CompactionSnapshot` 保存完整原文、已有短文本和最新历史裁剪记录。`CompactionOutput` 保存完整的工具短文本映射（含需要复用的旧记录），以及可选的新历史裁剪结果；`history_result=None` 表示沿用旧裁剪结果。
 
 ```text
-Loop：调用 session.run_compaction()
-  → Session：取出历史和已有压缩记录的副本
-  → WindowCompactor.shorten_tool_text()：计算工具短文本
-  → WindowCompactor.plan_history_compaction()：计算历史裁剪方案
-  → Session：校验并保存结果
+Loop：每次模型请求前
+  → Session.compaction_snapshot()：提供独立快照
+  → WindowCompactor.compact()：计算并返回两类结果
+  → Session.record_compaction()：校验并一起保存
   → Session：组装模型上下文
   → Loop：调用模型
 ```
 
-压缩器决定策略。Session 检查返回字段、范围是否在原始历史内、是否保留当前用户问题，以及替换后工具调用和结果是否完整配对。
+压缩器决定策略。Session 检查返回字段、短文本位置是否对应工具消息、历史范围是否在原文内、是否保留当前用户问题，以及替换后工具调用和结果是否完整配对。检查集中在独立的小方法里，主流程只表达读取、计算和记录。
 
 一次检查中，两种新结果全部处理成功后才保存。若校验或压缩失败，保留原始历史和此前已保存的记录，不留下只保存了一半的新压缩结果。
 
@@ -730,7 +733,7 @@ python evals/run_eval.py --live --case eligible_explicit_application
 
 当前业务评估主要覆盖七天无理由退货流程，自动检查工具序列和参数、预期与意外订单修改，以及回复中的关键和禁止表述。词组匹配只是辅助信号，业务判断和表达仍需要人工复核。
 
-当前评估创建 Session 时没有注入 `WindowCompactor`，也没有启动时的 `task` 注册步骤，所以业务评估不能视为主对话压缩或子 Agent 的完整验收；压缩由离线单元测试单独检查。详细案例范围和人工评分标准见 `evals/README.md`。
+当前评估调用 Loop 时没有传入 `WindowCompactor`，也没有启动时的 `task` 注册步骤，所以业务评估不能视为主对话压缩或子 Agent 的完整验收；压缩由离线单元测试单独检查。详细案例范围和人工评分标准见 `evals/README.md`。
 
 ## 17. 项目结构与阅读顺序
 

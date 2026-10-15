@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .contracts import CompactionResult
+from .contracts import CompactionOutput, CompactionResult, CompactionSnapshot
 
 
 class WindowCompactor(BaseModel):
@@ -24,7 +25,29 @@ class WindowCompactor(BaseModel):
     # 给省略说明留出空间；预算包含首尾文本和说明本身。
     max_tool_result_chars: int = Field(default=4_000, ge=256)
 
-    def shorten_tool_text(self, content: str, history_index: int) -> str | None:
+    def compact(self, snapshot: CompactionSnapshot) -> CompactionOutput:
+        """复用已有短文本，先截短工具结果，再根据工作窗口决定是否裁剪历史。"""
+
+        history = deepcopy(snapshot.history)
+        tool_texts = dict(snapshot.shortened_tool_texts)
+        for index, message in enumerate(history):
+            if message["role"] != "tool":
+                continue
+            if index not in tool_texts:
+                content = self._shorten_tool_text(message["content"], index)
+                if content is not None:
+                    tool_texts[index] = content
+            if index in tool_texts:
+                message["content"] = tool_texts[index]
+
+        # 预算依据截短后的工作窗口，原始快照保持完整，供后续读取或追溯。
+        history_result = self._plan_history_compaction(history, snapshot.current_result)
+        return CompactionOutput(
+            shortened_tool_texts=tool_texts,
+            history_result=history_result,
+        )
+
+    def _shorten_tool_text(self, content: str, history_index: int) -> str | None:
         """只缩短工具正文，返回首尾片段和说明；工具角色与调用 ID 由 Session 保留。"""
 
         if len(content) <= self.max_tool_result_chars:
@@ -41,7 +64,7 @@ class WindowCompactor(BaseModel):
         tail_chars = keep_chars - head_chars
         return content[:head_chars] + marker + content[-tail_chars:]
 
-    def plan_history_compaction(
+    def _plan_history_compaction(
         self,
         history: list[dict[str, Any]],
         current_result: CompactionResult | None,

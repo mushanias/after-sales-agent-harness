@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from compact import CompactionResult, Compactor
+from compact import CompactionOutput, CompactionResult, CompactionSnapshot
 
 
 class SessionInputs(BaseModel):
@@ -56,7 +56,7 @@ class ToolResult(BaseModel):
 
 class Session:
     """
-    独立管理一个会话的输入与历史，通过注入的压缩器获取并记录压缩结果。
+    独立管理一个会话的输入、历史和压缩记录，不执行压缩算法或编排。
 
     system_prompt、skills 单独保存，history 只包含 user、assistant 和 tool。
     写入入口分别校验消息及工具配对关系；失败时保持已有历史不变。
@@ -69,9 +69,8 @@ class Session:
         self,
         system_prompt: str,
         skills: str,
-        compactor: Compactor | None = None,
     ) -> None:
-        """保存系统输入和可选压缩器，创建本会话独立的历史与结果记录。"""
+        """保存系统输入，创建本会话独立的历史与结果记录。"""
 
         self._inputs = SessionInputs(system_prompt=system_prompt, skills=skills)
         if not self._inputs.system_prompt.strip():
@@ -79,7 +78,6 @@ class Session:
 
         self._history: list[dict[str, Any]] = []
         self._pending_tool_calls: set[str] = set()
-        self._compactor = compactor
         self._compaction_results: list[CompactionResult] = []
         self._shortened_tool_texts: dict[int, str] = {}
 
@@ -113,50 +111,45 @@ class Session:
 
         return dict(self._shortened_tool_texts)
 
-    def run_compaction(self) -> None:
-        """组织按需压缩流程：委托压缩器计算工具短文本和历史方案，校验后统一保存。"""
+    def compaction_snapshot(self) -> CompactionSnapshot:
+        """提供完整原文和已有记录的副本；本方法只读取，不触发压缩。"""
 
-        if self._compactor is None:
-            return
+        self._require_complete_tools()
+        latest = self._compaction_results[-1] if self._compaction_results else None
+        return CompactionSnapshot(
+            history=self.history,
+            shortened_tool_texts=self.shortened_tool_texts,
+            current_result=deepcopy(latest),
+        )
+
+    def record_compaction(self, output: CompactionOutput) -> None:
+        """校验并一起保存两类压缩记录；任何检查失败都保留此前状态。"""
+
+        self._require_complete_tools()
+        output = CompactionOutput.model_validate(output).model_copy(deep=True)
+        self._validate_tool_texts(output.shortened_tool_texts)
+        if output.history_result is not None:
+            self._validate_compaction(output.history_result)
+
+        # 所有校验通过后才写入，避免只保存了工具截短、却没有保存历史方案。
+        self._shortened_tool_texts = output.shortened_tool_texts
+        if output.history_result is not None:
+            self._compaction_results.append(output.history_result)
+
+    def _require_complete_tools(self) -> None:
+        """工具调用和结果配对完整后，才能处理或读取当前上下文。"""
+
         if self._pending_tool_calls:
-            raise ValueError("工具结果尚未全部返回，不能检查压缩")
+            raise ValueError("工具结果尚未全部返回，不能处理上下文")
 
-        history = self.history
-        tool_results = dict(self._shortened_tool_texts)
-        for index, message in enumerate(history):
-            if message["role"] != "tool":
-                continue
-            if index not in tool_results:
-                content = self._compactor.shorten_tool_text(
-                    content=message["content"], history_index=index
-                )
-                if content is not None:
-                    tool_results[index] = ToolResult(
-                        tool_call_id=message["tool_call_id"], content=content
-                    ).content
-            if index in tool_results:
-                message["content"] = tool_results[index]
+    def _validate_tool_texts(self, tool_texts: dict[int, str]) -> None:
+        """短正文只能替换原始工具消息；类型检查由 CompactionOutput 完成。"""
 
-        current_result = (
-            deepcopy(self._compaction_results[-1])
-            if self._compaction_results
-            else None
-        )
-        result = self._compactor.plan_history_compaction(
-            history=history,
-            current_result=current_result,
-        )
-        if result is not None:
-            # 可变的 Pydantic 实例也重新校验；全部成功后再记录，避免保存半个结果。
-            payload = result.model_dump() if isinstance(result, CompactionResult) else result
-            validated_result = CompactionResult.model_validate(payload)
-            self._validate_compaction(validated_result)
-            validated_result = validated_result.model_copy(deep=True)
-
-        # 原文已经完整记录；压缩失败时不写入任何一类新结果。
-        self._shortened_tool_texts = tool_results
-        if result is not None:
-            self._compaction_results.append(validated_result)
+        for index in tool_texts:
+            if not 0 <= index < len(self._history):
+                raise ValueError("工具短文本位置必须位于完整历史内")
+            if self._history[index]["role"] != "tool":
+                raise ValueError("工具短文本只能替换工具消息")
 
     def _validate_compaction(self, result: CompactionResult) -> None:
         """校验替换范围和组装后的会话完整性，不限定具体裁剪策略。"""
@@ -198,8 +191,7 @@ class Session:
         每次组装都读取最新完整历史与压缩结果，组装结果不写回历史。
         """
 
-        if self._pending_tool_calls:
-            raise ValueError("工具结果尚未全部返回，不能组装模型上下文")
+        self._require_complete_tools()
 
         system_messages = [
             {"role": "system", "content": self.system_prompt},

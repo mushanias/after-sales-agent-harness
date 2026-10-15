@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from compact import Compactor
 from hooks import trigger_hooks
 from middleware import approval_middleware
 from model import ModelConfig
@@ -73,12 +74,17 @@ def agent_loop(
     client: Any,
     model: ModelConfig,
     session: Session,
+    compactor: Compactor | None = None,
 ) -> str | None:
     """从会话读取最新上下文并记录回复、工具结果，直到模型直接回复。"""
 
     while True:
         # 每次请求前检查，覆盖本轮工具返回大段文本的情况。
-        session.run_compaction()
+        if compactor is not None:
+            snapshot = session.compaction_snapshot()
+            output = compactor.compact(snapshot)
+            session.record_compaction(output)
+
         response = client.chat.completions.create(
             model=model.model_id,
             messages=session.build_context(),

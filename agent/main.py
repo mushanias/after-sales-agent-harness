@@ -56,8 +56,8 @@ def main() -> None:
     session = Session(
         system_prompt=SYSTEM_PROMPT,
         skills=skill.skills_catalog(),
-        compactor=WindowCompactor(),
     )
+    compactor = WindowCompactor()
 
     print("售后处理 Agent：输入问题开始，输入 q 退出。")
     while True:
@@ -73,7 +73,7 @@ def main() -> None:
 
         session.add_user(query)
 
-        content = agent_loop(client, model, session)
+        content = agent_loop(client, model, session, compactor)
         if content:
             print(content)
 

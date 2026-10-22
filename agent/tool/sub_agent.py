@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from typing import Any
 
 from model import ModelConfig
-
-
+from collections.abc import Awaitable, Callable
 TASK_TOOL = {
     "type": "function",
     "function": {
@@ -30,21 +28,24 @@ TASK_TOOL = {
 }
 
 
+
 def create_sub_agent(
     client: Any,
     model: ModelConfig,
-) -> Callable[[str], str | None]:
-    """绑定共享的客户端和模型，返回只接收 task 的工具处理器。"""
+) -> Callable[[str], Awaitable[str | None]]:
 
-    def run(task: str) -> str | None:
-        """执行一次使用独立消息列表的子任务。"""
-
-        return agent_loop(task, client=client, model=model)
+    async def run(task: str) -> str | None:
+        return await agent_loop(
+            task,
+            client=client,
+            model=model,
+        )
 
     return run
 
 
-def agent_loop(task: str, *, client: Any, model: ModelConfig) -> str | None:
+
+async def agent_loop(task: str, *, client: Any, model: ModelConfig) -> str | None:
     """从 task 建立独立消息列表，执行完只返回最终回复。"""
 
     # 在运行时导入，避免工具注册表与主循环互相导入。
@@ -55,7 +56,7 @@ def agent_loop(task: str, *, client: Any, model: ModelConfig) -> str | None:
     messages = [{"role": "user", "content": task}]
     sub_tools = [tool for tool in TOOLS if tool["function"]["name"] != "task"]
     for _ in range(30):
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=model.model_id,
             messages=messages,
             tools=sub_tools,

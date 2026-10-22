@@ -74,7 +74,7 @@ async def execute_tool(tool_call: Any) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-def agent_loop(
+async def agent_loop(
     client: Any,
     model: ModelConfig,
     session: Session,
@@ -89,7 +89,7 @@ def agent_loop(
             output = compactor.compact(snapshot)
             session.record_compaction(output)
 
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=model.model_id,
             messages=session.build_context(),
             tools=TOOLS,

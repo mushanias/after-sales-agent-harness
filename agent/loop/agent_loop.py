@@ -11,9 +11,9 @@ from middleware import approval_middleware
 from model import ModelConfig
 from session import Session
 from tool import TOOL_HANDLERS, TOOLS
+import inspect
 
-
-def execute_tool(tool_call: Any) -> str:
+async def execute_tool(tool_call: Any) -> str:
     """
     在 Loop 允许执行工具后，解析参数并调用已注册的处理器。
 
@@ -60,6 +60,10 @@ def execute_tool(tool_call: Any) -> str:
 
     try:
         result = handler(**arguments)
+
+        if inspect.isawaitable(result):
+            result = await result
+
     except (TypeError, ValueError) as error:
         result = {
             "ok": False,

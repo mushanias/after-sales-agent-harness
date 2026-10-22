@@ -6,8 +6,8 @@ from typing import Any, Callable
 
 from tool import TOOL_PERMISSIONS, Permissions
 
+from collections.abc import Awaitable
 
-ToolHandler = Callable[[Any], str]
 
 
 def check_permission(tool_name: str) -> Permissions:
@@ -27,7 +27,7 @@ def check_permission(tool_name: str) -> Permissions:
     return TOOL_PERMISSIONS.get(tool_name, Permissions.DENY)
 
 
-def approval_middleware(tool_call: Any, next_handler: ToolHandler) -> str:
+async def approval_middleware(tool_call: Any, next_handler: Callable[[Any], Awaitable[str]]) -> str:
     """
     在工具真正执行前，根据权限等级决定是否调用下一个处理器。
 
@@ -49,7 +49,7 @@ def approval_middleware(tool_call: Any, next_handler: ToolHandler) -> str:
     permission = check_permission(tool_name)
 
     if permission is Permissions.ALLOW:
-        return next_handler(tool_call)
+        return await next_handler(tool_call)
 
     if permission is Permissions.DENY:
         return f"工具 {tool_name} 已被禁用"
@@ -61,7 +61,7 @@ def approval_middleware(tool_call: Any, next_handler: ToolHandler) -> str:
         while True:
             choice = input("是否允许执行? (y/n): ").strip().lower()
             if choice in {"y", "yes"}:
-                return next_handler(tool_call)
+                return await next_handler(tool_call)
             if choice in {"n", "no"}:
                 return f"用户拒绝执行 {tool_name}"
             print("请输入 y 或 n")

@@ -12,6 +12,7 @@ from model import ModelConfig
 from session import Session
 from tool import TOOL_HANDLERS, TOOLS
 import inspect
+import asyncio
 
 async def execute_tool(tool_call: Any) -> str:
     """
@@ -73,6 +74,22 @@ async def execute_tool(tool_call: Any) -> str:
 
     return json.dumps(result, ensure_ascii=False)
 
+async def run_one_tool(tool_call: Any) -> str:
+    """执行一次工具调用，返回结果，由父 Loop 写入会话。"""
+
+    trigger_hooks("PreToolUse", tool_call)
+
+    result = await approval_middleware(
+        tool_call,
+        execute_tool,
+    )
+
+    reminder = trigger_hooks("PostToolUse", tool_call, result)
+    if reminder is not None:
+        result = f"{result}\n{reminder}"
+
+    return result
+
 
 async def agent_loop(
     client: Any,
@@ -103,13 +120,13 @@ async def agent_loop(
         if not tool_calls:
             return response_message.content
 
-        for tool_call in tool_calls:
-            trigger_hooks("PreToolUse", tool_call)
-            tool_result = approval_middleware(
-                tool_call,
-                execute_tool,
-            )
-            post_hook_result = trigger_hooks("PostToolUse", tool_call, tool_result)
-            if post_hook_result is not None:
-                tool_result = f"{tool_result}\n{post_hook_result}"
-            session.add_tool_result(tool_call.id, tool_result)
+        results = await asyncio.gather(
+            *(run_one_tool(call) for call in tool_calls),
+            return_exceptions=True,
+        )
+
+        for call, result in zip(tool_calls, results):
+            if isinstance(result, BaseException):
+                raise result
+
+            session.add_tool_result(call.id, result)

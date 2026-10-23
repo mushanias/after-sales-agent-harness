@@ -77,7 +77,7 @@ async def agent_loop(task: str, *, client: Any, model: ModelConfig) -> str | Non
                     ensure_ascii=False,
                 )
             else:
-                tool_result = approval_middleware(tool_call, execute_tool)
+                tool_result = await approval_middleware(tool_call, execute_tool)
             messages.append(
                 {
                     "role": "tool",

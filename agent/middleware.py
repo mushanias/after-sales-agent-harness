@@ -8,7 +8,9 @@ from tool import TOOL_PERMISSIONS, Permissions
 
 from collections.abc import Awaitable
 
+import asyncio
 
+_APPROVAL_LOCK = asyncio.Lock()
 
 def check_permission(tool_name: str) -> Permissions:
     """
@@ -55,15 +57,30 @@ async def approval_middleware(tool_call: Any, next_handler: Callable[[Any], Awai
         return f"工具 {tool_name} 已被禁用"
 
     if permission is Permissions.ASK:
-        print(f"\n工具调用请求: {tool_name}")
-        print(f"参数: {tool_call.function.arguments}")
+        async with _APPROVAL_LOCK:
+            print(f"\n工具调用请求: {tool_name}")
+            print(f"参数: {tool_call.function.arguments}")
 
-        while True:
-            choice = input("是否允许执行? (y/n): ").strip().lower()
-            if choice in {"y", "yes"}:
-                return await next_handler(tool_call)
-            if choice in {"n", "no"}:
-                return f"用户拒绝执行 {tool_name}"
-            print("请输入 y 或 n")
+            while True:
+                raw_choice = await asyncio.to_thread(
+                    input,
+                    "是否允许执行? (y/n): ",
+                )
+                choice = raw_choice.strip().lower()
+
+                if choice in {"y", "yes"}:
+                    approved = True
+                    break
+
+                if choice in {"n", "no"}:
+                    approved = False
+                    break
+
+                print("请输入 y 或 n")
+
+        if approved:
+            return await next_handler(tool_call)
+
+        return f"用户拒绝执行 {tool_name}"
 
     return f"未知权限等级: {permission}"

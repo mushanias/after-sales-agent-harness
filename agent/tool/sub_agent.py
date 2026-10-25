@@ -7,6 +7,12 @@ from typing import Any
 
 from model import ModelConfig
 from collections.abc import Awaitable, Callable
+
+_SUB_AGENT_ALLOWED_TOOLS = {
+    "lookup_order",
+    "load_skill",
+}
+
 TASK_TOOL = {
     "type": "function",
     "function": {
@@ -54,7 +60,11 @@ async def agent_loop(task: str, *, client: Any, model: ModelConfig) -> str | Non
     from tool import TOOLS
 
     messages = [{"role": "user", "content": task}]
-    sub_tools = [tool for tool in TOOLS if tool["function"]["name"] != "task"]
+    sub_tools = [
+        tool
+        for tool in TOOLS
+        if tool["function"]["name"] in _SUB_AGENT_ALLOWED_TOOLS
+    ]
     for _ in range(30):
         response = await client.chat.completions.create(
             model=model.model_id,
@@ -71,13 +81,22 @@ async def agent_loop(task: str, *, client: Any, model: ModelConfig) -> str | Non
             return response_message.content
 
         for tool_call in tool_calls:
-            if tool_call.function.name == "task":
+
+            tool_name = tool_call.function.name
+            if tool_name not in _SUB_AGENT_ALLOWED_TOOLS:
                 tool_result = json.dumps(
-                    {"ok": False, "error": "UNKNOWN_TOOL", "message": "子 Agent 不能调用 task"},
+                    {
+                        "ok": False,
+                        "error": "TOOL_NOT_ALLOWED",
+                        "message": f"子 Agent 不允许调用工具 {tool_name}",
+                    },
                     ensure_ascii=False,
                 )
             else:
-                tool_result = await approval_middleware(tool_call, execute_tool)
+                tool_result = await approval_middleware(
+                    tool_call,
+                    execute_tool,
+                )
             messages.append(
                 {
                     "role": "tool",

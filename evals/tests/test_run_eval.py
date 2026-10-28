@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sys
@@ -9,7 +10,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 EVAL_ROOT = Path(__file__).resolve().parents[1]
@@ -86,7 +87,16 @@ class FakeCompletions:
         )
 
 
-class EvalRunnerTests(unittest.TestCase):
+class AsyncFakeCompletions(FakeCompletions):
+    """提供主 Loop 使用的异步模型接口，仍只返回内存中的模拟消息。"""
+
+    async def create(self, **kwargs: Any) -> Any:
+        """异步返回下一条模拟响应。"""
+
+        return super().create(**kwargs)
+
+
+class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
     """验证数据集结构和临时数据库隔离。"""
 
     def test_suite_is_valid(self) -> None:
@@ -97,7 +107,7 @@ class EvalRunnerTests(unittest.TestCase):
         self.assertEqual(12, len(case_ids))
         self.assertEqual(12, len(set(case_ids)))
 
-    def test_loop_refreshes_context_and_keeps_turn_history(self) -> None:
+    async def test_loop_refreshes_context_and_keeps_turn_history(self) -> None:
         """工具结果进入下一次请求，下一轮保留历史，审批及 Hook 仍正常触发。"""
 
         from session import Session
@@ -107,7 +117,7 @@ class EvalRunnerTests(unittest.TestCase):
             FakeToolCall("call-1", "lookup_order", {"order_id": "1"}),
             FakeToolCall("call-2", "lookup_order", {"order_id": "2"}),
         ]
-        completions = FakeCompletions(
+        completions = AsyncFakeCompletions(
             [
                 FakeMessage(tool_calls=tool_calls),
                 FakeMessage(content="Both records found"),
@@ -135,11 +145,11 @@ class EvalRunnerTests(unittest.TestCase):
             ) as hooks,
         ):
             self.assertEqual(
-                "Both records found", loop_module.agent_loop(client, model, session)
+                "Both records found", await loop_module.agent_loop(client, model, session)
             )
             session.add_user("Continue")
             self.assertEqual(
-                "Next turn complete", loop_module.agent_loop(client, model, session)
+                "Next turn complete", await loop_module.agent_loop(client, model, session)
             )
 
         self.assertEqual(3, len(completions.contexts))
@@ -174,39 +184,87 @@ class EvalRunnerTests(unittest.TestCase):
             [call.args[0] for call in hooks.call_args_list],
         )
 
-    def test_loop_uses_compacted_context_and_receives_new_tool_results(self) -> None:
-        """裁剪后的上下文进入真实 Loop，新工具结果仍进入下一次模拟模型请求。"""
+    async def test_loop_accepts_plain_message_list_plugin(self) -> None:
+        """Loop 只请求投影消息，不读取历史，也不接收插件的进度字段。"""
 
-        from compact import WindowCompactor
+        from compact import ContextProjector
         from session import Session
 
         loop_module = importlib.import_module("loop.agent_loop")
-        compactor = WindowCompactor(max_chars=1)
+        session = Session("固定说明", "技能目录")
+        session.add_user("旧问题")
+        session.add_assistant({"role": "assistant", "content": "旧回答"})
+        session.add_user("当前问题")
+        original_history = session.history
+        projected = [
+            {"role": "assistant", "content": "插件提供的旧轮次摘要"},
+            original_history[-1],
+        ]
+        plugin = Mock(spec=ContextProjector)
+        plugin.build_messages.return_value = projected
+        completions = AsyncFakeCompletions([FakeMessage(content="最终回答")])
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        with patch.object(loop_module, "trigger_hooks", return_value=None):
+            answer = await loop_module.agent_loop(
+                client, SimpleNamespace(model_id="fake-model"), session, plugin,
+            )
+
+        plugin.build_messages.assert_called_once_with(session)
+        self.assertEqual("最终回答", answer)
+        self.assertEqual(projected, completions.contexts[0][2:])
+        self.assertEqual(
+            ["固定说明", "可用 Skills 短目录：\n技能目录"],
+            [message["content"] for message in completions.contexts[0][:2]],
+        )
+        self.assertEqual(original_history, session.history[:-1])
+
+    async def test_loop_uses_compacted_context_and_receives_new_tool_results(self) -> None:
+        """裁剪后的上下文进入真实 Loop，新工具结果仍进入下一次模拟模型请求。"""
+
+        from compact import WindowContextProjector
+        from session import Session
+
+        loop_module = importlib.import_module("loop.agent_loop")
+        projector = WindowContextProjector(max_chars=1)
         session = Session("固定说明", "技能目录")
         for turn in range(1, 6):
             session.add_user(f"第 {turn} 轮问题")
             session.add_assistant({"role": "assistant", "content": "原始回答" * 300})
         session.add_user("查询两个订单")
         original_history = session.history
-        session.record_compaction(compactor.compact(session.compaction_snapshot()))
-        expected_context = session.build_context()
-        self.assertEqual(1, len(session.compaction_results))
+        expected_context = loop_module.build_request_messages(
+            session.system_prompt, session.skills, projector.build_messages(session),
+        )
+        self.assertLess(len(expected_context), len(original_history) + 2)
         tool_calls = [
             FakeToolCall("new-1", "lookup_order", {"order_id": "1"}),
-            FakeToolCall("new-2", "lookup_order", {"order_id": "2"}),
+            FakeToolCall("new-2", "load_skill", {"name": "demo"}),
         ]
-        completions = FakeCompletions([
+        completions = AsyncFakeCompletions([
             FakeMessage(tool_calls=tool_calls),
             FakeMessage(content="两个订单已查询"),
         ])
         client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
         model = SimpleNamespace(model_id="fake-model")
 
+        started = set()
+        both_started = asyncio.Event()
+
+        async def simulated_tool(call, handler):
+            """两种工具都启动后才能返回，串行调度会超时而失败。"""
+
+            started.add(call.id)
+            if len(started) == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=1)
+            return {"new-1": "订单一", "new-2": "技能内容"}[call.id]
+
         with (
-            patch.object(loop_module, "approval_middleware", side_effect=["订单一", "订单二"]),
+            patch.object(loop_module, "approval_middleware", side_effect=simulated_tool),
             patch.object(loop_module, "trigger_hooks", return_value=None),
         ):
-            answer = loop_module.agent_loop(client, model, session, compactor)
+            answer = await loop_module.agent_loop(client, model, session, projector)
 
         self.assertEqual("两个订单已查询", answer)
         self.assertEqual(expected_context, completions.contexts[0])
@@ -216,18 +274,22 @@ class EvalRunnerTests(unittest.TestCase):
             [message["role"] for message in completions.contexts[1][-3:]],
         )
         self.assertEqual("订单一", completions.contexts[1][-2]["content"])
-        self.assertEqual("订单二", completions.contexts[1][-1]["content"])
+        self.assertEqual("技能内容", completions.contexts[1][-1]["content"])
+        self.assertEqual(
+            ["new-1", "new-2"],
+            [message["tool_call_id"] for message in completions.contexts[1][-2:]],
+        )
         self.assertEqual(original_history, session.history[:len(original_history)])
         self.assertEqual(answer, session.history[-1]["content"])
 
-    def test_loop_shortens_large_tool_result_before_next_model_request(self) -> None:
+    async def test_loop_shortens_large_tool_result_before_next_model_request(self) -> None:
         """首轮工具返回大文本后立即缩短，后续轮次复用结果且不再次执行工具。"""
 
-        from compact import WindowCompactor
+        from compact import WindowContextProjector
         from session import Session
 
         loop_module = importlib.import_module("loop.agent_loop")
-        compactor = WindowCompactor(max_tool_result_chars=512)
+        projector = WindowContextProjector(max_tool_result_chars=512)
         session = Session("固定说明", "技能目录")
         session.add_user("读取规则并提交模拟退款")
         original_text = "规则开头。" + "演示正文。" * 2000 + "规则结尾。"
@@ -236,7 +298,7 @@ class EvalRunnerTests(unittest.TestCase):
             FakeToolCall("large-result", "load_skill", {"name": "demo"}),
             FakeToolCall("refund-result", "request_refund", {"order_id": "demo"}),
         ]
-        completions = FakeCompletions([
+        completions = AsyncFakeCompletions([
             FakeMessage(tool_calls=tool_calls),
             FakeMessage(content="模拟处理完毕"),
             FakeMessage(content="下一轮解释完毕"),
@@ -250,14 +312,15 @@ class EvalRunnerTests(unittest.TestCase):
             ) as approval,
             patch.object(loop_module, "trigger_hooks", return_value=None),
         ):
-            self.assertEqual("模拟处理完毕", loop_module.agent_loop(client, model, session, compactor))
+            self.assertEqual("模拟处理完毕", await loop_module.agent_loop(client, model, session, projector))
             session.add_user("继续解释")
-            self.assertEqual("下一轮解释完毕", loop_module.agent_loop(client, model, session, compactor))
+            self.assertEqual("下一轮解释完毕", await loop_module.agent_loop(client, model, session, projector))
 
-        shortened = session.shortened_tool_texts[2]
+        messages = projector.build_messages(session)
+        shortened = messages[2]["content"]
         self.assertEqual(512, len(shortened))
         self.assertEqual(original_text, session.history[2]["content"])
-        self.assertEqual((), session.compaction_results)
+        self.assertEqual(len(session.history), len(messages))
         self.assertEqual(2, approval.call_count)
         self.assertEqual(3, len(completions.contexts[0]))
         for context in completions.contexts[1:]:

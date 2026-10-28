@@ -86,9 +86,9 @@ python gui.py
 | --- | --- | --- |
 | 启动入口 | 选择模型、创建客户端、注册运行时工具、创建 Session、接收用户输入 | `agent/main.py` |
 | 主循环 Loop | 调用模型、判断是否继续、经过权限检查执行工具、回填结果 | `agent/loop/agent_loop.py` |
-| Session | 保存原始消息和两种压缩记录，检查工具配对，组装上下文 | `agent/session/session.py` |
-| 压缩器 | 决定工具文本如何截短、历史何时裁剪和保留哪些轮次 | `agent/compact/window_compactor.py` |
-| 压缩契约 | 规定输入快照、统一输出，以及历史替换范围和标记内容 | `agent/compact/contracts.py` |
+| Session | 保存完整原文、检查写入关系、提供历史副本 | `agent/session/session.py` |
+| 上下文投影器 | 取得历史副本、维护工作消息，并决定截短、裁剪和保留轮次 | `agent/compact/window_compactor.py` |
+| 投影契约 | 约定原文读取与工作消息构建两个方法 | `agent/compact/contracts.py` |
 | 工具 | 提供订单查询、规则读取、退款申请、计划记录和子任务入口 | `agent/tool/` |
 | 订单存储 | 从 SQLite 读取和更新订单事实 | `agent/knowledge/facts/orderstore/order_store.py` |
 | Skill 知识 | 提供政策、店规和处理指导；按需读取全文 | `agent/knowledge/skill/` |
@@ -97,7 +97,7 @@ python gui.py
 | 子 Agent | 用独立消息列表完成一个子任务，返回最终文本 | `agent/tool/sub_agent.py` |
 | 评估 | 用固定案例、临时订单数据库检查工具行为和回复 | `evals/run_eval.py` |
 
-例如“保留首轮和最近三轮”属于压缩器的策略；“保存这个结果，并把它放进下一次上下文”属于 Session；“什么时候准备下一次模型请求”属于 Loop。
+例如“取得原文副本、保留首轮和最近三轮、维护下次使用的工作消息”属于上下文投影器；“记录用户、模型和工具的原始消息”属于 Session；“什么时候准备下一次模型请求”属于 Loop。
 
 ## 4. 启动流程
 
@@ -108,7 +108,7 @@ python gui.py
   → 读取当前模型需要的 API Key
   → 创建模型客户端 client
   → configure_tools(client, model) 绑定 task 工具
-  → 分别创建 Session 和 WindowCompactor，交给主 Loop
+  → 分别创建 Session 和 WindowContextProjector，交给主 Loop
   → 进入命令行输入循环
 ```
 
@@ -118,7 +118,7 @@ python gui.py
 2. `main()` 从 `MODEL_POOL[DEFAULT_MODEL]` 取得模型名称、服务地址和密钥变量名。
 3. 使用这些配置创建 `OpenAI` 客户端。缺少依赖或密钥时，启动会给出提示并停止。
 4. 调用 `configure_tools(client, model)`。普通工具已经注册；`task` 需要共享客户端和模型，所以在此时绑定处理函数。
-5. 创建 Session，传入系统提示和 Skill 短目录；单独创建 `WindowCompactor()`，通过主 Loop 使用。
+5. 创建 Session，传入系统提示和 Skill 短目录；为本会话单独创建 `WindowContextProjector()`，通过主 Loop 使用。Loop 未收到投影器时使用 `FullHistoryProjector`，原样提供历史。
 6. 等待用户输入。退出指令结束程序；有效问题通过 `session.add_user(query)` 写入原始历史，然后进入主循环。
 
 系统提示包含店铺身份、当前日期、查询订单要求、知识使用方式和业务执行边界。日期在加载入口模块时生成，当前没有跨午夜自动刷新提示的逻辑。
@@ -170,19 +170,19 @@ assistant：根据查询结果解释订单状态
 
 代码顺序如下：
 
-1. Loop 读取 `session.compaction_snapshot()`，调用 `compactor.compact(snapshot)`，再由 `session.record_compaction(output)` 校验并保存结果。
-2. `session.build_context()` 返回本次模型消息。
+1. Loop 调用 `projector.build_messages(session)`；插件通过自己的 `get_history(session)` 取得历史副本，返回本次完整动态消息。
+2. Loop 内的 `build_request_messages(system_prompt, skills, messages)` 包装固定系统输入，得到本次模型消息。
 3. Loop 调用 `client.chat.completions.create(...)`，把 `messages` 和 `tools=TOOLS` 一起交给模型。
 4. 响应到达后触发 `PostModelResponse`，然后通过 `session.add_assistant(...)` 保存模型消息。
-5. 如果包含工具调用，按返回顺序逐个处理，当前没有并发执行。
+5. 如果包含工具调用，通过 `asyncio.gather` 并发调度全部调用。
 6. 每个调用先触发 `PreToolUse`，再经过权限中间件。
 7. 执行或拒绝后触发 `PostToolUse`；如果 Hook 返回提醒，把提醒附在结果后面。
-8. 用 `session.add_tool_result(tool_call.id, tool_result)` 保存结果。
+8. 收齐结果后，按原调用顺序，用 `session.add_tool_result(tool_call.id, tool_result)` 配对保存；保存顺序不代表执行顺序。
 9. 本批所有工具都得到结果后，回到第 1 步，再请求模型。
 
 请求中的 `max_tokens=8000` 用于限制模型输出 token 数，和后面介绍的历史字符预算是两个参数。
 
-## 6. Session 如何保存消息和组装上下文
+## 6. Session 如何保存原始消息
 
 ### 保存的数据
 
@@ -193,8 +193,6 @@ Session 内部保留以下关系：
 | `_inputs` | 系统提示和 Skill 短目录 |
 | `_history` | 只追加的完整动态消息：用户、模型和工具消息 |
 | `_pending_tool_calls` | 模型已经请求、尚未得到结果的工具调用 ID |
-| `_compaction_results` | 历次整段历史裁剪结果 |
-| `_shortened_tool_texts` | 原始消息位置到缩短工具文本的映射 |
 
 这里的下划线表示内部字段。正常流程通过 `add_user()`、`add_assistant()`、`add_tool_result()` 写入，通过 `history` 等属性读取副本。
 
@@ -210,7 +208,7 @@ tool 返回：tool_call_id=call_01 → 订单 1001 的结果
 tool 返回：tool_call_id=call_02 → 订单 1002 的结果
 ```
 
-Session 在保存模型消息时登记这两个待返回 ID，每保存一个工具结果就移除对应 ID。全部返回后，才能组装下一次上下文或继续接入模型消息。
+Session 在保存模型消息时登记这两个待返回 ID，每保存一个工具结果就移除对应 ID。全部返回后，才能继续接入模型消息；Loop 也会等待本批全部工具结束后再请求模型。
 
 因此，工具被拒绝时也要回填一条结果。它说明“没有执行”，同时让这次调用有明确的结束记录。
 
@@ -219,24 +217,26 @@ Session 在保存模型消息时登记这两个待返回 ID，每保存一个工
 - 用户消息不能为空；上一轮有最终回复且没有待返回工具时，才能追加新问题。
 - 模型消息必须接在用户消息或工具结果之后；同一响应里的工具 ID 不能重复。
 - 工具结果必须对应待返回 ID；不存在的 ID 或重复返回会被拒绝。
-- 工具结果尚未全部返回时，不能组装主对话上下文，也不能检查压缩。
+- 工具结果尚未全部返回时，不能追加下一条模型回复。
 
 Pydantic 负责字段和类型校验，Session 负责消息先后关系与工具配对。这些检查不判断订单是否符合退款条件。
 
-### `build_context()` 的组装顺序
+### 原文副本与请求包装
+
+Session 不保存模型工作上下文。投影器通过 `get_history(session)` 读取 `session.history` 的完整深拷贝；Loop 只请求投影结果。修改副本不会修改会话内部记录。
+
+Loop 内的 `build_request_messages()` 只做固定包装：
 
 ```text
 第 1 条 system：系统提示
 第 2 条 system：Skill 短目录
-动态历史副本：
-  先替换过长工具结果的正文
-  再用最新历史裁剪标记替换被省略的中段
-  保留其余用户、模型和工具消息
+动态消息：上下文投影插件返回的完整 messages
+  若没有启用上下文投影插件，则直接使用完整 history 副本
 ```
 
 工具声明通过请求的 `tools` 参数单独发送，不保存为 `_history` 里的消息。订单和规则全文只有被工具读取后，才作为工具结果进入历史。
 
-`build_context()` 返回独立列表，不把它写回 `_history`。`session.history` 返回完整原文的深拷贝，所以修改这个副本不会修改会话内部记录。
+包装结果不会写回 `_history`。压缩后的覆盖、追加和保留轮次等规则由插件内部决定，Session 不根据压缩结果做拼接。
 
 当前按事件逐条记录：用户输入先保存，模型返回后保存模型消息，工具返回后保存工具消息。中途失败不会自动撤销整轮已保存的数据，也不会撤销已经提交的订单修改。
 
@@ -399,160 +399,105 @@ Todo 提醒按工具处理次数计数：连续三次没有调用 `todo_write` �
 `trigger_hooks()` 按注册顺序运行；遇到第一个非 `None` 返回值就返回，不再继续调用后续回调。当前子 Agent 没有接入这套 Hook 流程。
 
 
-## 11. 两种压缩如何运行
+## 11. 上下文投影插件如何生成工作上下文
 
-当前的“压缩”是确定性的文本截短和历史裁剪，**没有调用模型生成语义摘要**。完整原文继续保存在 Session 内存中。
+当前插件执行确定性的工具文本截短和历史裁剪，没有调用模型生成语义摘要。完整原文保存在 Session 内存中，工作消息和处理进度保存在当前会话自己的压缩器实例中。
 
-### 11.1 什么时候检查
+### 11.1 调用流程
 
 主 Loop 每次调用模型前，执行：
 
 ```python
-if compactor is not None:
-    snapshot = session.compaction_snapshot()
-    output = compactor.compact(snapshot)
-    session.record_compaction(output)
-messages = session.build_context()
+messages = projector.build_messages(session)
+request_messages = build_request_messages(session.system_prompt, session.skills, messages)
 ```
-
-这样，刚返回的大工具结果会在下一次模型看到它之前得到处理。Loop 只知道快照和结果，下面的处理顺序由 WindowCompactor 内部决定：
 
 ```text
-复制原始动态历史
-  → 检查并截短单条工具结果
-  → 在这些短文本的基础上检查整段历史窗口
-  → 校验结果
-  → 保存两种压缩记录
-  → build_context 组装模型上下文
+Loop 请求投影器的 build_messages(session)
+  → 投影器调用自己的 get_history(session)，取得完整原始历史副本
+  → 内部接入新消息、截短、裁剪并拼接
+  → 插件返回完整动态 messages
+  → Loop 的 build_request_messages 包装固定系统输入
+  → Loop 请求模型
 ```
 
-工具调用必须全部返回才进入这一步。整段历史裁剪还要求最新一条消息是用户问题，所以只在新用户轮次开始时执行；单条工具结果检查则会在每次主模型请求前执行。
+Session 只负责原始记录，不接收压缩结果。Loop 收齐本批工具结果后，才进入下一次模型请求。插件按需更新工作上下文，可以称为按需更新的历史投影。
 
-### 11.2 默认参数
+### 11.2 插件的输入和输出
 
-参数位于 `WindowCompactor`：
+接口定义在 `agent/compact/contracts.py`：
+
+```python
+get_history(session: Session) -> list[dict[str, Any]]
+build_messages(session: Session) -> list[dict[str, Any]]
+```
+
+| 数据 | 含义 |
+| --- | --- |
+| 来源 `session` | 当前会话；由插件的 `get_history()` 取得只追加的完整原文副本 |
+| 输出 `messages` | 本次模型使用的完整动态消息列表副本，不含系统输入 |
+
+输出不带 `end`、裁剪区间或工具短文本映射。调用方拿到的始终是完整消息列表，不能把它再次追加到旧结果后。
+
+WindowContextProjector 内部保存 `_messages` 和 `_history_end`。例如，插件已处理前 10 条原文，随后完整历史增长到 12 条；下一次调用时，插件自己取得全部 12 条的副本，找出新增两条、接入工作消息，成功后更新内部进度并返回完整结果。Session 不读取或配合这个进度。
+
+`ContextProjector` 是方法契约，具体实现必须提供原文读取与工作消息构建两个方法。`FullHistoryProjector` 原样返回完整原文，是 Loop 的默认实现；`WindowContextProjector` 在读取副本后维护窗口并执行压缩。这样 Loop 无需负责获取原文，也无需分支处理压缩算法。
+
+其他压缩实现可以选择每次重算，也可以持有摘要缓存；它们只需遵守同一个消息列表接口。具体覆盖、追加、保留轮次和状态维护方式都属于插件内部。
+
+WindowContextProjector 是有状态插件，**每个会话必须创建独立实例**；实例随会话复用，不能跨会话共享。当前 `main()` 为 Session 单独创建一个压缩器，再将两者交给 Loop。
+
+### 11.3 策略参数
+
+参数全部位于 `WindowContextProjector`：
 
 | 参数 | 默认值 | 含义 |
 | --- | --- | --- |
-| `max_tool_result_chars` | `4_000` | 单条工具结果正文的最大字符数，包含省略说明；最小可配置值为 256 |
-| `max_chars` | `20_000` | 当前动态历史窗口序列化后的字符预算 |
-| `keep_recent_turns` | `3` | 保留最近的用户轮次，包含刚追加的当前问题；首轮另外保留 |
+| `max_tool_result_chars` | `4_000` | 单条工具正文字符上限，含省略说明；最小为 256 |
+| `max_chars` | `20_000` | 当前动态上下文序列化后的字符预算 |
+| `keep_recent_turns` | `3` | 保留最近的用户轮次，包含当前问题；首轮另外保留 |
 
-`max_chars` 的估算方式是 `len(json.dumps(messages, ensure_ascii=False, default=str))`。它计算动态消息及其 JSON 结构字符，**不是精确 token 数**，也没有计算系统提示、Skill 短目录、工具声明和预留输出。
+`max_chars` 使用 `len(json.dumps(messages, ensure_ascii=False, default=str))` 估算，不是精确 token 数，也没有计算系统输入、工具声明和预留输出。
 
-如果要调整策略参数，修改 `main()` 创建压缩器的位置即可，例如：
+调整已有参数时修改 `main()` 创建 `WindowContextProjector` 的参数。以后增加 `token_budget` 或改变算法，只要仍返回完整动态消息列表，Session 就无需增加对应字段。
 
-```python
-compactor = WindowCompactor(
-    max_chars=20_000,
-    keep_recent_turns=3,
-    max_tool_result_chars=4_000,
-)
-```
+### 11.4 工具正文截短
 
-### 11.3 单条工具结果过长
-
-目的：应对某一次 `load_skill` 或其他工具返回了大段文本的情况。
+插件将新增原文接入自己的工作消息，对过长工具正文保留开头、说明和结尾。普通结果保留原文；工具角色、调用 ID 和参数保持原样。
 
 ```text
-完整工具结果
-  → 正文未超限：保留原文
-  → 正文超限：保留开头 + 省略说明 + 结尾
-  → 保存缩短文本，原始消息不改动
+session.history：保存完整工具原文
+插件返回的 messages：相应工具正文可以是短文本
 ```
 
-截短说明包含原文字符数、原始消息位置、原文仍在 Session 内存中，以及归档读取尚未接入。算法先给说明留出空间，再把剩余字符预算分配给开头和结尾，所以最终文本不会超过单条预算。
+说明包含原文字符数、原文仍在 Session 内存中，以及归档读取尚未接入。算法不理解业务语义，也不保证截短后仍是完整 JSON，不能据此推测省略的规则或事实。
 
-例如，原始动态历史下标为 2 的消息（第三条，Python 下标从 0 开始）是工具结果：
+已有短文本留在插件工作消息中，满足预算就继续复用，不需要重新执行业务工具。
 
-```text
-_history[2]["content"]：完整工具原文
-_shortened_tool_texts[2]：开头片段 + 说明 + 结尾片段
-```
+### 11.5 历史轮次裁剪
 
-组装上下文时，只替换这条工具消息的 `content`，保留它的 `role="tool"` 和 `tool_call_id`，仍对应原来的工具调用。
-
-这里按文本位置截断，不理解业务含义，也不保证保留 JSON 内部结构。模型看到的是带说明的文本片段，不能据此推测中间被省略的规则或事实。
-
-已保存的短文本会继续复用；未超限的结果不会新增截短记录。这个步骤不重新调用工具。
-
-### 11.4 整段历史超过预算
-
-目的：应对多轮对话累积了较多消息的情况。
-
-压缩器按 `role="user"` 找到每轮起点。当当前动态窗口超过字符预算，且中间还有可省略的轮次时：
+工具正文缩短后，插件检查工作窗口是否超过字符预算。只有在新用户轮次开始、存在可省略的中间轮次时，才尝试裁剪：
 
 ```text
 压缩前：第 1 轮 | 第 2 轮 | 第 3 轮 | 第 4 轮 | 第 5 轮 | 第 6 轮当前问题
-
 压缩后：第 1 轮 | 历史省略标记 | 第 4 轮 | 第 5 轮 | 第 6 轮当前问题
 ```
 
-默认保留首轮和最近三轮，最近三轮包含当前问题。示例中的第 2、3 轮整段一起省略，工具请求、对应结果和最终回复不会只删掉其中一部分。
+首轮和最近三轮保留；被省略轮次中的工具请求、结果和最终回复一起移除。裁剪起止位置只在插件内部使用。
 
-统一输出的 `history_result` 字段保存一个 `CompactionResult`：
+需要重新裁剪时，WindowContextProjector 从完整原文选出首轮和近期轮次，缩短保留部分中的大工具正文，拼接新的说明消息并替换工作窗口，避免逐层叠加旧说明。
 
-| 字段 | 含义 |
-| --- | --- |
-| `start` | 被省略范围的第一个原始消息位置 |
-| `end` | 被省略范围结束后的第一个位置 |
-| `content` | 替换该范围的说明文本 |
-| `archive_path` | 为以后文件归档预留的路径；当前策略返回 `None` |
+说明包含省略范围和原文位置，不是业务摘要。当前没有历史读取工具，依赖缺失信息时，应说明缺失并向用户确认。
 
-范围采用 Python 切片形式 `[start, end)`：包括 `start`，不包括 `end`。例如 `[2, 10)` 表示省略 8 条消息，不是 8 轮对话。
+窗口未超限、轮次不足、正在处理一轮工具链，或者裁剪后反而更长时，保留现有窗口；本次新增消息和新缩短的工具正文仍进入返回结果。
 
-Session 使用结果组装：
+### 11.6 输出责任与失败边界
 
-```python
-history[:start] + [{"role": "assistant", "content": marker}] + history[end:]
-```
+上下文投影插件负责其输出：保持工具调用与结果完整配对、保留当前用户问题、避免重复原文和重复省略标记，并隔离返回列表与内部状态。具体策略的测试验证这些约定。
 
-标记说明省略条数、原始范围和原文位置；它是历史省略说明，没有总结被删掉的业务内容。当前没有文件归档或读取工具，依赖缺失信息时，应明确说明并向用户确认。
+WindowContextProjector 完成一次加工后才保存新的工作消息和处理进度；中途失败时保留此前状态，Session 原文也不受影响。下一次收到完整历史后，插件仍能重新接入尚未处理的消息。
 
-后续再次裁剪时，新结果仍指向完整原始历史的位置。当前上下文只应用最新一条结果，不把历次标记全部叠加进去，也不让被省略的原文同时重复进入上下文。
-
-压缩器在以下情况将输出的 `history_result` 设为 `None`，表示保持已有裁剪状态：窗口未超限、正在单轮工具处理中、轮次数不足、没有更大的可省略范围，或者新标记没有让窗口变短。统一输出仍然携带工具短文本映射。
-
-### 11.5 两个压缩储存字段
-
-**这两个字段保存不同类型的结果，并不保存两份完整历史。**
-
-| 内部字段 | 数据形式 | 对应的公开读取属性 | 上下文中的用法 |
-| --- | --- | --- | --- |
-| `_compaction_results` | `list[CompactionResult]` | `session.compaction_results`，返回记录副本组成的 tuple | 用最新记录把旧轮次替换成一条标记 |
-| `_shortened_tool_texts` | `dict[int, str]` | `session.shortened_tool_texts`，返回字典副本 | 按原始位置替换工具正文 |
-
-完整历史在第三个字段 `_history` 中，可以通过 `session.history` 读取副本。所有位置都对应这份只追加的历史，因此新消息追加后，旧记录的位置仍然稳定。
-
-应用时先替换工具文本，再裁剪历史中段。如果某条工具消息已经随整轮省略，它的短文本也不会另外进入上下文。
-
-### 11.6 谁决定，谁校验，谁保存
-
-方法和属性按职责命名：
-
-| 所属对象 | 名称 | 职责 |
-| --- | --- | --- |
-| Session | `compaction_snapshot()` | 返回原始历史、已有工具短文本和最新历史裁剪记录的独立副本 |
-| Session | `record_compaction(output)` | 校验并一起保存两类结果，不执行压缩 |
-| Session | `shortened_tool_texts` | 读取已保存的工具短文本副本；这是 `@property` 属性，访问时不加括号，也不执行压缩 |
-| WindowCompactor | `compact(snapshot)` | 统一处理工具正文和历史窗口，返回 `CompactionOutput` |
-
-Session 不持有压缩器。`Compactor(Protocol)` 只约定一个 `compact()` 方法，Loop 按这个契约调用具体压缩器。`_shorten_tool_text()` 和 `_plan_history_compaction()` 是 WindowCompactor 的内部步骤，调用方不需要了解它们。
-
-`CompactionSnapshot` 保存完整原文、已有短文本和最新历史裁剪记录。`CompactionOutput` 保存完整的工具短文本映射（含需要复用的旧记录），以及可选的新历史裁剪结果；`history_result=None` 表示沿用旧裁剪结果。
-
-```text
-Loop：每次模型请求前
-  → Session.compaction_snapshot()：提供独立快照
-  → WindowCompactor.compact()：计算并返回两类结果
-  → Session.record_compaction()：校验并一起保存
-  → Session：组装模型上下文
-  → Loop：调用模型
-```
-
-压缩器决定策略。Session 检查返回字段、短文本位置是否对应工具消息、历史范围是否在原文内、是否保留当前用户问题，以及替换后工具调用和结果是否完整配对。检查集中在独立的小方法里，主流程只表达读取、计算和记录。
-
-一次检查中，两种新结果全部处理成功后才保存。若校验或压缩失败，保留原始历史和此前已保存的记录，不留下只保存了一半的新压缩结果。
+Session 继续检查原始消息的写入格式、先后关系和调用 ID 配对，不再校验压缩结果。Loop 的 `build_request_messages()` 只包装固定输入，具体压缩规则不进入这个函数。
 
 ### 11.7 压缩后仍然过大怎么办
 
@@ -565,7 +510,7 @@ Loop：每次模型请求前
 - 当前用户问题或模型回复过长，现有策略没有对它们单独截短。
 - 系统提示、Skill 短目录和工具声明不在当前动态字符预算内。
 
-当前代码仍会按已有流程发起请求，无法容纳时可能由模型服务报错。以后需要补的连接位置是：`build_context()` 得到最终消息后，发送前检查总预算，再决定继续、停止或要求缩小输入。这里描述的是后续处理位置，当前尚未实现。
+当前代码仍会按已有流程发起请求，无法容纳时可能由模型服务报错。未来可由上下文插件与请求包装约定如何计算最终输入预算；本次仍使用现有字符估算，没有增加总预算检查或超限停止逻辑。
 
 ## 12. 数据最终保存在哪里
 
@@ -573,8 +518,7 @@ Loop：每次模型请求前
 | --- | --- | --- |
 | 系统提示和 Skill 短目录 | Session 的 `_inputs` | 会话对象消失；下次启动重新构建 |
 | 主对话原始消息与完整工具结果 | Session 的 `_history` | 否，只有内存记录 |
-| 整段裁剪记录 | Session 的 `_compaction_results` | 否 |
-| 单条工具短文本 | Session 的 `_shortened_tool_texts` | 否 |
+| 当前工作消息与处理进度 | 当前会话的 WindowContextProjector 内部 | 否 |
 | 当前 Todo 和 Hook 计数 | 工具或 Hook 模块的内存变量 | 否 |
 | 子 Agent 的中间消息 | 子任务函数里的独立列表 | 否，未提供保存或读取入口 |
 | 订单与退款状态 | `agent/knowledge/facts/orders.db` | 是，SQLite 文件 |
@@ -586,14 +530,14 @@ Loop：每次模型请求前
 之前讨论的 L1 / L2 / L3，可以对应当前的数据关系：
 
 ```text
-L1 当前工作上下文：build_context() 临时组装的消息
-L2 压缩信息：历史省略标记和单条工具短文本
+L1 本次请求上下文：Loop 的 build_request_messages() 包装后的消息
+L2 当前加工结果：上下文投影插件内部的工作消息和处理进度
 L3 完整历史：Session._history 中的原始消息和工具结果
 ```
 
 三层目前都在会话内存里。`cache → index → storage` 是后续存储分层的思路，尚未实现文件存储和历史读取工具；不能把标记里的原文位置当作模型已经可以调用的读取接口。
 
-`archive_path` 是预留连接点。填写一个路径不会创建文件，也不会让模型自动读到文件；当前 `WindowCompactor` 把该字段设为 `None`。
+当前没有归档路径结果字段，也没有文件归档或读取接口；省略标记只说明原文仍在 Session 内存中。
 
 历史原文用于回答“当时发生了什么”，重新查询工具用于回答“现在是什么状态”。恢复过去的记录不应重新执行 `request_refund` 这类修改状态的操作。
 
@@ -733,7 +677,7 @@ python evals/run_eval.py --live --case eligible_explicit_application
 
 当前业务评估主要覆盖七天无理由退货流程，自动检查工具序列和参数、预期与意外订单修改，以及回复中的关键和禁止表述。词组匹配只是辅助信号，业务判断和表达仍需要人工复核。
 
-当前评估调用 Loop 时没有传入 `WindowCompactor`，也没有启动时的 `task` 注册步骤，所以业务评估不能视为主对话压缩或子 Agent 的完整验收；压缩由离线单元测试单独检查。详细案例范围和人工评分标准见 `evals/README.md`。
+当前评估调用 Loop 时没有传入 `WindowContextProjector`，也没有启动时的 `task` 注册步骤，所以业务评估不能视为主对话压缩或子 Agent 的完整验收；压缩由离线单元测试单独检查。详细案例范围和人工评分标准见 `evals/README.md`。
 
 ## 17. 项目结构与阅读顺序
 

@@ -100,29 +100,43 @@ Agent 层：
 业务层：
 副作用工具尽可能支持幂等
 
-## Session / Compactor 重构
+## Session / ContextProjector 重构
 
-**场景**：每次调用模型前，需要根据会话历史检查是否压缩上下文。
+**场景**：调用模型前，根据完整历史生成本次模型要看到的动态消息。
 
-**问题**：原先 Session 同时管理会话数据和安排压缩步骤，更换压缩策略容易牵动 Session。
+**问题**：如果 Session 根据压缩结果里的位置字段拼接上下文，每种压缩实现都要配合 Session 的同步规则，插件边界仍不完整。
 
-**解决方案**：Session 管数据，Compactor 管压缩，Loop 决定调用时机。
+**解决方案**：Session 保存原文并提供副本；上下文投影插件管理工作消息和处理进度；Loop 安排调用并包装固定系统输入。
 
 ```python
-snapshot = session.compaction_snapshot()
-output = compactor.compact(snapshot)
-session.record_compaction(output)
+messages = projector.build_messages(session)
+request_messages = build_request_messages(session.system_prompt, session.skills, messages)
 ```
 
-Session 不再持有压缩器，原来的 `run_compaction()` 已移除。压缩器统一提供 `compact()`，内部决定工具结果截短和历史裁剪的顺序。Session 接收结果时完成校验，全部通过后一起保存，再由 `build_context()` 应用到上下文副本。
+ContextProjector 提供两个方法：`get_history(session)` 取得完整原文副本，`build_messages(session)` 在内部调用前者，维护工作上下文并返回完整动态消息。Loop 只调用后者。Session 不接收、保存或检查投影结果，也不根据压缩字段追加原文。
+
+`Protocol` 声明实现需要提供哪些方法；取得副本的实际代码位于具体投影器中。当前 `FullHistoryProjector` 原样返回完整历史，作为 Loop 未指定投影器时的默认实现；`WindowContextProjector` 则在取得副本后执行截短和轮次裁剪。
+
+| 数据 | 所属位置 | 用途 |
+| --- | --- | --- |
+| `history` | Session 的 `_history` | 完整原始动态记录，只追加；公开属性返回深拷贝 |
+| 工作 `messages` | 具体上下文投影器内部 | 已截短或裁剪的模型工作历史 |
+| 处理进度 `end` | 具体上下文投影器内部 | 决定下次如何接入新增原文，不跨类传递 |
+| 请求消息 | Loop 中的 `build_request_messages()` | 系统 prompt、技能目录和插件返回的动态消息 |
+
+例如，原始历史有 10 条，WindowContextProjector 已将它加工成 4 条。后来 Session 的原始历史增长到 12 条；Loop 再次请求工作消息，投影器自己取得最新副本，根据内部进度接入新增两条，再返回完整工作消息。Session 不知道处理进度是多少。
+
+这是按需更新的历史投影：准备请求模型时才处理，原始记录不被改写。当前 WindowContextProjector 在内部维护 `_messages` 和 `_history_end`；其他实现可以使用不同状态或每次重算，接口不要求返回 `end`。
 
 后续维护按职责找位置：
 
-- **调整压缩策略**：改 `agent/compact/window_compactor.py`，或实现同样的 `compact()` 接口后在 `main` 中替换。
-- **调整数据管理与合法性规则**：改 `agent/session/session.py`。完整 history 只追加，压缩记录单独保存；不能破坏工具调用与结果的配对，也不能裁掉当前用户问题。
-- **调整调用时机**：改 `agent/loop/agent_loop.py`。当前在每次请求模型前调用，工具结果必须全部返回。
-- **调整输入输出**：改 `agent/compact/contracts.py` 并同步调用方。位置始终对应完整 history；输出的工具短文本映射包含需要保留的旧记录，`history_result=None` 表示沿用上一份历史裁剪结果。
+- **调整压缩策略与状态**：改 `agent/compact/window_compactor.py`。截短、裁剪、预算、进度、结果拼接和压缩后的消息完整性均由插件负责。
+- **调整原始数据写入规则**：改 `agent/session/session.py`。它检查用户、模型、工具消息的写入顺序和调用 ID 配对，并隔离原文副本。
+- **调整调用和包装**：改 `agent/loop/agent_loop.py`。每次请求模型前取得插件结果，`build_request_messages()` 只包装系统输入，不参与压缩拼接。
+- **查看插件接口**：`agent/compact/contracts.py` 中的 `ContextProjector`，要求实现 `get_history(session)` 和 `build_messages(session)`。新增 `token_budget` 等策略参数时，只要仍交回消息列表，就无需修改 Session。
 
-修改后重点验证：原文未被改写、会话互相隔离、非法结果不会造成部分写入。相关测试在 `evals/tests/test_session_compaction.py` 和 `evals/tests/test_run_eval.py`。
+WindowContextProjector 是有状态插件，**每个会话创建独立实例**，生命周期跟随该会话。`main()` 为当前 Session 单独创建它；不能把同一个实例用于多个会话。
 
-本次只拆分职责，仍使用原有截短和裁剪策略；会话数据目前保存在内存中，尚未实现语义摘要和文件归档。
+重点验证：原文未被改写、新消息只接入一次、重复加工不叠加省略标记、插件实例互相隔离、加工失败不留下半份工作状态。相关测试在 `evals/tests/test_session_compaction.py` 和 `evals/tests/test_run_eval.py`，使用模拟模型调用。
+
+当前仍采用字符预算、工具正文首尾截短、首轮与近期轮次保留。字符预算是裁剪触发条件，受保护轮次本身过大时不保证严格低于预算。尚未实现精确 token 预算、语义摘要和文件归档；原文和工作消息都只在内存中。

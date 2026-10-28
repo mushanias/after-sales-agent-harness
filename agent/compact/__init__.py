@@ -1,8 +1,7 @@
-"""压缩契约与轻量历史裁剪策略的公开入口。"""
+"""上下文投影接口与原文、裁剪两种实现的公开入口。"""
 
-from .contracts import CompactionOutput, CompactionResult, CompactionSnapshot, Compactor
-from .window_compactor import WindowCompactor
+from .contracts import ContextProjector
+from .history_projector import FullHistoryProjector
+from .window_compactor import WindowContextProjector
 
-__all__ = [
-    "CompactionOutput", "CompactionResult", "CompactionSnapshot", "Compactor", "WindowCompactor"
-]
+__all__ = ["ContextProjector", "FullHistoryProjector", "WindowContextProjector"]

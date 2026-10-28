@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from compact import Compactor
+from compact import ContextProjector, FullHistoryProjector
 from hooks import trigger_hooks
 from middleware import approval_middleware
 from model import ModelConfig
@@ -13,7 +13,7 @@ from session import Session
 from tool import TOOL_HANDLERS, TOOLS
 import inspect
 import asyncio
-
+# ====================稍后把这部分提取出来，保持核心文件的干净
 async def execute_tool(tool_call: Any) -> str:
     """
     在 Loop 允许执行工具后，解析参数并调用已注册的处理器。
@@ -91,24 +91,38 @@ async def run_one_tool(tool_call: Any) -> str:
     return result
 
 
+def build_request_messages(
+    system_prompt: str,
+    skills: str,
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """包装固定系统输入与插件交付的完整动态消息，不处理压缩或增量拼接。"""
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": f"可用 Skills 短目录：\n{skills}"},
+    ] + messages
+# ==========
+
+
+# 我们使用投影
 async def agent_loop(
     client: Any,
     model: ModelConfig,
     session: Session,
-    compactor: Compactor | None = None,
+    projector: ContextProjector | None = None,
 ) -> str | None:
-    """从会话读取最新上下文并记录回复、工具结果，直到模型直接回复。"""
+    """向投影器请求工作消息，并记录回复、工具结果，直到模型直接回复。"""
+
+    if projector is None:
+        projector = FullHistoryProjector()
 
     while True:
         # 每次请求前检查，覆盖本轮工具返回大段文本的情况。
-        if compactor is not None:
-            snapshot = session.compaction_snapshot()
-            output = compactor.compact(snapshot)
-            session.record_compaction(output)
-
+        messages = projector.build_messages(session)
         response = await client.chat.completions.create(
             model=model.model_id,
-            messages=session.build_context(),
+            messages=build_request_messages(session.system_prompt, session.skills, messages),
             tools=TOOLS,
             max_tokens=8000,
         )

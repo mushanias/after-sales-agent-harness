@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import date
 
-from compact import WindowCompactor
+from compact import WindowContextProjector
 from knowledge import skill
 from loop import agent_loop
 from model import DEFAULT_MODEL, MODEL_POOL
@@ -57,7 +57,8 @@ async def main() -> None:
         system_prompt=SYSTEM_PROMPT,
         skills=skill.skills_catalog(),
     )
-    compactor = WindowCompactor()
+    # 投影器取得历史副本并持有工作上下文，每个 Session 配一个独立实例。
+    projector = WindowContextProjector()
 
     print("售后处理 Agent：输入问题开始，输入 q 退出。")
     while True:
@@ -73,7 +74,7 @@ async def main() -> None:
 
         session.add_user(query)
 
-        content = await agent_loop(client, model, session, compactor)
+        content = await agent_loop(client, model, session, projector)
         if content:
             print(content)
 

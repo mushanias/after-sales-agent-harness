@@ -110,6 +110,7 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_loop_refreshes_context_and_keeps_turn_history(self) -> None:
         """工具结果进入下一次请求，下一轮保留历史，审批及 Hook 仍正常触发。"""
 
+        from context import WindowContextProjector
         from session import Session
 
         loop_module = importlib.import_module("loop.agent_loop")
@@ -127,6 +128,7 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
         client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
         model = SimpleNamespace(model_id="fake-model")
         session = Session(system_prompt="System instructions", skills="lookup")
+        context = WindowContextProjector()
         session.add_user("Find two records")
 
         def hook_result(event_name: str, *args: Any) -> str | None:
@@ -145,11 +147,11 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
             ) as hooks,
         ):
             self.assertEqual(
-                "Both records found", await loop_module.agent_loop(client, model, session)
+                "Both records found", await loop_module.agent_loop(client, model, session, context)
             )
             session.add_user("Continue")
             self.assertEqual(
-                "Next turn complete", await loop_module.agent_loop(client, model, session)
+                "Next turn complete", await loop_module.agent_loop(client, model, session, context)
             )
 
         self.assertEqual(3, len(completions.contexts))
@@ -187,7 +189,7 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_loop_accepts_plain_message_list_plugin(self) -> None:
         """Loop 只请求投影消息，不读取历史，也不接收插件的进度字段。"""
 
-        from compact import ContextProjector
+        from context import Context
         from session import Session
 
         loop_module = importlib.import_module("loop.agent_loop")
@@ -200,14 +202,14 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
             {"role": "assistant", "content": "插件提供的旧轮次摘要"},
             original_history[-1],
         ]
-        plugin = Mock(spec=ContextProjector)
+        plugin = Mock(spec=Context)
         plugin.build_messages.return_value = projected
         completions = AsyncFakeCompletions([FakeMessage(content="最终回答")])
         client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
 
         with patch.object(loop_module, "trigger_hooks", return_value=None):
             answer = await loop_module.agent_loop(
-                client, SimpleNamespace(model_id="fake-model"), session, plugin,
+                client, SimpleNamespace(model_id="fake-model"), session, context=plugin,
             )
 
         plugin.build_messages.assert_called_once_with(session)
@@ -222,11 +224,11 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_loop_uses_compacted_context_and_receives_new_tool_results(self) -> None:
         """裁剪后的上下文进入真实 Loop，新工具结果仍进入下一次模拟模型请求。"""
 
-        from compact import WindowContextProjector
+        from context import WindowContextProjector
         from session import Session
 
         loop_module = importlib.import_module("loop.agent_loop")
-        projector = WindowContextProjector(max_chars=1)
+        context = WindowContextProjector(max_chars=1)
         session = Session("固定说明", "技能目录")
         for turn in range(1, 6):
             session.add_user(f"第 {turn} 轮问题")
@@ -234,7 +236,7 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
         session.add_user("查询两个订单")
         original_history = session.history
         expected_context = loop_module.build_request_messages(
-            session.system_prompt, session.skills, projector.build_messages(session),
+            session.system_prompt, session.skills, context.build_messages(session),
         )
         self.assertLess(len(expected_context), len(original_history) + 2)
         tool_calls = [
@@ -264,7 +266,7 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(loop_module, "approval_middleware", side_effect=simulated_tool),
             patch.object(loop_module, "trigger_hooks", return_value=None),
         ):
-            answer = await loop_module.agent_loop(client, model, session, projector)
+            answer = await loop_module.agent_loop(client, model, session, context)
 
         self.assertEqual("两个订单已查询", answer)
         self.assertEqual(expected_context, completions.contexts[0])
@@ -285,11 +287,11 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_loop_shortens_large_tool_result_before_next_model_request(self) -> None:
         """首轮工具返回大文本后立即缩短，后续轮次复用结果且不再次执行工具。"""
 
-        from compact import WindowContextProjector
+        from context import WindowContextProjector
         from session import Session
 
         loop_module = importlib.import_module("loop.agent_loop")
-        projector = WindowContextProjector(max_tool_result_chars=512)
+        context = WindowContextProjector(max_tool_result_chars=512)
         session = Session("固定说明", "技能目录")
         session.add_user("读取规则并提交模拟退款")
         original_text = "规则开头。" + "演示正文。" * 2000 + "规则结尾。"
@@ -312,19 +314,19 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
             ) as approval,
             patch.object(loop_module, "trigger_hooks", return_value=None),
         ):
-            self.assertEqual("模拟处理完毕", await loop_module.agent_loop(client, model, session, projector))
+            self.assertEqual("模拟处理完毕", await loop_module.agent_loop(client, model, session, context))
             session.add_user("继续解释")
-            self.assertEqual("下一轮解释完毕", await loop_module.agent_loop(client, model, session, projector))
+            self.assertEqual("下一轮解释完毕", await loop_module.agent_loop(client, model, session, context))
 
-        messages = projector.build_messages(session)
+        messages = context.build_messages(session)
         shortened = messages[2]["content"]
         self.assertEqual(512, len(shortened))
         self.assertEqual(original_text, session.history[2]["content"])
         self.assertEqual(len(session.history), len(messages))
         self.assertEqual(2, approval.call_count)
         self.assertEqual(3, len(completions.contexts[0]))
-        for context in completions.contexts[1:]:
-            tool_messages = [message for message in context if message["role"] == "tool"]
+        for request_context in completions.contexts[1:]:
+            tool_messages = [message for message in request_context if message["role"] == "tool"]
             self.assertEqual("large-result", tool_messages[0]["tool_call_id"])
             self.assertEqual(shortened, tool_messages[0]["content"])
             self.assertEqual(short_result, tool_messages[1]["content"])

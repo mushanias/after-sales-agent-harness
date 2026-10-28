@@ -33,9 +33,13 @@ class WindowContextProjector(BaseModel):
         return session.history
 
     def build_messages(self, session: Session) -> list[dict[str, Any]]:
-        """取得最新原文并接入新增消息；全部加工成功后才保存工作状态。"""
+        """取得完整原文副本，再交给本策略处理。"""
 
-        history = self.get_history(session)
+        return self.compact_history(self.get_history(session))
+
+    def compact_history(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """从完整原文副本接入新增消息；加工成功后才保存工作状态。"""
+
         messages = self._shorten_tool_results(self._messages + history[self._history_end:])
         messages = self._crop_history(history, messages)
 

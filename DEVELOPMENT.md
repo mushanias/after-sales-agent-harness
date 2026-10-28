@@ -100,7 +100,7 @@ Agent 层：
 业务层：
 副作用工具尽可能支持幂等
 
-## Session / ContextProjector 重构
+## Session / Context 重构
 
 **场景**：调用模型前，根据完整历史生成本次模型要看到的动态消息。
 
@@ -109,13 +109,13 @@ Agent 层：
 **解决方案**：Session 保存原文并提供副本；上下文投影插件管理工作消息和处理进度；Loop 安排调用并包装固定系统输入。
 
 ```python
-messages = projector.build_messages(session)
+messages = context.build_messages(session)
 request_messages = build_request_messages(session.system_prompt, session.skills, messages)
 ```
 
-ContextProjector 提供两个方法：`get_history(session)` 取得完整原文副本，`build_messages(session)` 在内部调用前者，维护工作上下文并返回完整动态消息。Loop 只调用后者。Session 不接收、保存或检查投影结果，也不根据压缩字段追加原文。
+Context 提供三个方法：`get_history(session)` 取得完整原文副本，`compact_history(history)` 处理副本，`build_messages(session)` 串起前两者，返回完整动态消息。Loop 只调用 `context.build_messages(session)`，`context` 必须由调用方明确传入。Session 不接收、保存或检查投影结果，也不根据压缩字段追加原文。
 
-`Protocol` 声明实现需要提供哪些方法；取得副本的实际代码位于具体投影器中。当前 `FullHistoryProjector` 原样返回完整历史，作为 Loop 未指定投影器时的默认实现；`WindowContextProjector` 则在取得副本后执行截短和轮次裁剪。
+`Protocol` 声明实现需要提供哪些方法；取得副本的实际代码位于具体上下文策略中。当前 `WindowContextProjector` 在取得副本后执行截短和轮次裁剪，Loop 不再提供默认策略。
 
 | 数据 | 所属位置 | 用途 |
 | --- | --- | --- |
@@ -130,10 +130,10 @@ ContextProjector 提供两个方法：`get_history(session)` 取得完整原文�
 
 后续维护按职责找位置：
 
-- **调整压缩策略与状态**：改 `agent/compact/window_compactor.py`。截短、裁剪、预算、进度、结果拼接和压缩后的消息完整性均由插件负责。
+- **调整压缩策略与状态**：改 `agent/context/window_compactor.py`。截短、裁剪、预算、进度、结果拼接和压缩后的消息完整性均由插件负责。
 - **调整原始数据写入规则**：改 `agent/session/session.py`。它检查用户、模型、工具消息的写入顺序和调用 ID 配对，并隔离原文副本。
 - **调整调用和包装**：改 `agent/loop/agent_loop.py`。每次请求模型前取得插件结果，`build_request_messages()` 只包装系统输入，不参与压缩拼接。
-- **查看插件接口**：`agent/compact/contracts.py` 中的 `ContextProjector`，要求实现 `get_history(session)` 和 `build_messages(session)`。新增 `token_budget` 等策略参数时，只要仍交回消息列表，就无需修改 Session。
+- **查看插件接口**：`agent/context/context.py` 中的 `Context`，要求实现 `get_history(session)`、`compact_history(history)` 和 `build_messages(session)`。新增 `token_budget` 等策略参数时，只要仍交回消息列表，就无需修改 Session。
 
 WindowContextProjector 是有状态插件，**每个会话创建独立实例**，生命周期跟随该会话。`main()` 为当前 Session 单独创建它；不能把同一个实例用于多个会话。
 

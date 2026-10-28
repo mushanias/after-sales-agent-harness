@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from compact import ContextProjector, FullHistoryProjector
+from context import Context
 from hooks import trigger_hooks
 from middleware import approval_middleware
 from model import ModelConfig
@@ -110,16 +110,13 @@ async def agent_loop(
     client: Any,
     model: ModelConfig,
     session: Session,
-    projector: ContextProjector | None = None,
+    context: Context,
 ) -> str | None:
     """向投影器请求工作消息，并记录回复、工具结果，直到模型直接回复。"""
 
-    if projector is None:
-        projector = FullHistoryProjector()
-
     while True:
         # 每次请求前检查，覆盖本轮工具返回大段文本的情况。
-        messages = projector.build_messages(session)
+        messages = context.build_messages(session)
         response = await client.chat.completions.create(
             model=model.model_id,
             messages=build_request_messages(session.system_prompt, session.skills, messages),

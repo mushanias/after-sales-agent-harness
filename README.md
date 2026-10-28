@@ -87,8 +87,8 @@ python gui.py
 | 启动入口 | 选择模型、创建客户端、注册运行时工具、创建 Session、接收用户输入 | `agent/main.py` |
 | 主循环 Loop | 调用模型、判断是否继续、经过权限检查执行工具、回填结果 | `agent/loop/agent_loop.py` |
 | Session | 保存完整原文、检查写入关系、提供历史副本 | `agent/session/session.py` |
-| 上下文投影器 | 取得历史副本、维护工作消息，并决定截短、裁剪和保留轮次 | `agent/compact/window_compactor.py` |
-| 投影契约 | 约定原文读取与工作消息构建两个方法 | `agent/compact/contracts.py` |
+| 上下文投影器 | 取得历史副本、维护工作消息，并决定截短、裁剪和保留轮次 | `agent/context/window_compactor.py` |
+| 投影契约 | 统一约定历史读取、策略处理与消息构建三个方法 | `agent/context/context.py` |
 | 工具 | 提供订单查询、规则读取、退款申请、计划记录和子任务入口 | `agent/tool/` |
 | 订单存储 | 从 SQLite 读取和更新订单事实 | `agent/knowledge/facts/orderstore/order_store.py` |
 | Skill 知识 | 提供政策、店规和处理指导；按需读取全文 | `agent/knowledge/skill/` |
@@ -118,7 +118,7 @@ python gui.py
 2. `main()` 从 `MODEL_POOL[DEFAULT_MODEL]` 取得模型名称、服务地址和密钥变量名。
 3. 使用这些配置创建 `OpenAI` 客户端。缺少依赖或密钥时，启动会给出提示并停止。
 4. 调用 `configure_tools(client, model)`。普通工具已经注册；`task` 需要共享客户端和模型，所以在此时绑定处理函数。
-5. 创建 Session，传入系统提示和 Skill 短目录；为本会话单独创建 `WindowContextProjector()`，通过主 Loop 使用。Loop 未收到投影器时使用 `FullHistoryProjector`，原样提供历史。
+5. 创建 Session，传入系统提示和 Skill 短目录；为本会话单独创建 `context = WindowContextProjector()`，明确传给主 Loop。`context` 是必填参数。
 6. 等待用户输入。退出指令结束程序；有效问题通过 `session.add_user(query)` 写入原始历史，然后进入主循环。
 
 系统提示包含店铺身份、当前日期、查询订单要求、知识使用方式和业务执行边界。日期在加载入口模块时生成，当前没有跨午夜自动刷新提示的逻辑。
@@ -170,7 +170,7 @@ assistant：根据查询结果解释订单状态
 
 代码顺序如下：
 
-1. Loop 调用 `projector.build_messages(session)`；插件通过自己的 `get_history(session)` 取得历史副本，返回本次完整动态消息。
+1. Loop 调用 `context.build_messages(session)`；插件通过自己的 `get_history(session)` 取得历史副本，返回本次完整动态消息。
 2. Loop 内的 `build_request_messages(system_prompt, skills, messages)` 包装固定系统输入，得到本次模型消息。
 3. Loop 调用 `client.chat.completions.create(...)`，把 `messages` 和 `tools=TOOLS` 一起交给模型。
 4. 响应到达后触发 `PostModelResponse`，然后通过 `session.add_assistant(...)` 保存模型消息。
@@ -231,7 +231,6 @@ Loop 内的 `build_request_messages()` 只做固定包装：
 第 1 条 system：系统提示
 第 2 条 system：Skill 短目录
 动态消息：上下文投影插件返回的完整 messages
-  若没有启用上下文投影插件，则直接使用完整 history 副本
 ```
 
 工具声明通过请求的 `tools` 参数单独发送，不保存为 `_history` 里的消息。订单和规则全文只有被工具读取后，才作为工具结果进入历史。
@@ -408,14 +407,14 @@ Todo 提醒按工具处理次数计数：连续三次没有调用 `todo_write` �
 主 Loop 每次调用模型前，执行：
 
 ```python
-messages = projector.build_messages(session)
+messages = context.build_messages(session)
 request_messages = build_request_messages(session.system_prompt, session.skills, messages)
 ```
 
 ```text
 Loop 请求投影器的 build_messages(session)
   → 投影器调用自己的 get_history(session)，取得完整原始历史副本
-  → 内部接入新消息、截短、裁剪并拼接
+  → compact_history(history) 接入新消息、截短、裁剪并拼接
   → 插件返回完整动态 messages
   → Loop 的 build_request_messages 包装固定系统输入
   → Loop 请求模型
@@ -425,10 +424,11 @@ Session 只负责原始记录，不接收压缩结果。Loop 收齐本批工具�
 
 ### 11.2 插件的输入和输出
 
-接口定义在 `agent/compact/contracts.py`：
+唯一接口 `Context` 定义在 `agent/context/context.py`：
 
 ```python
 get_history(session: Session) -> list[dict[str, Any]]
+compact_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]
 build_messages(session: Session) -> list[dict[str, Any]]
 ```
 
@@ -441,7 +441,7 @@ build_messages(session: Session) -> list[dict[str, Any]]
 
 WindowContextProjector 内部保存 `_messages` 和 `_history_end`。例如，插件已处理前 10 条原文，随后完整历史增长到 12 条；下一次调用时，插件自己取得全部 12 条的副本，找出新增两条、接入工作消息，成功后更新内部进度并返回完整结果。Session 不读取或配合这个进度。
 
-`ContextProjector` 是方法契约，具体实现必须提供原文读取与工作消息构建两个方法。`FullHistoryProjector` 原样返回完整原文，是 Loop 的默认实现；`WindowContextProjector` 在读取副本后维护窗口并执行压缩。这样 Loop 无需负责获取原文，也无需分支处理压缩算法。
+`Context` 是方法契约，具体实现提供以上三个方法。Loop 只调用 `context.build_messages(session)`，由具体实现串起 `get_history(session)` 和 `compact_history(history)`。传给策略的是完整历史副本，返回的也是完整工作消息。调用方必须明确传入上下文策略；当前使用 `WindowContextProjector` 维护窗口并执行压缩。协议声明用于接口约定和静态类型检查，本身不执行传输或压缩。
 
 其他压缩实现可以选择每次重算，也可以持有摘要缓存；它们只需遵守同一个消息列表接口。具体覆盖、追加、保留轮次和状态维护方式都属于插件内部。
 
@@ -677,14 +677,14 @@ python evals/run_eval.py --live --case eligible_explicit_application
 
 当前业务评估主要覆盖七天无理由退货流程，自动检查工具序列和参数、预期与意外订单修改，以及回复中的关键和禁止表述。词组匹配只是辅助信号，业务判断和表达仍需要人工复核。
 
-当前评估调用 Loop 时没有传入 `WindowContextProjector`，也没有启动时的 `task` 注册步骤，所以业务评估不能视为主对话压缩或子 Agent 的完整验收；压缩由离线单元测试单独检查。详细案例范围和人工评分标准见 `evals/README.md`。
+当前评估为每个案例明确创建并传入 `WindowContextProjector`，没有启动时的 `task` 注册步骤，所以业务评估不能视为子 Agent 的完整验收；上下文处理另有离线单元测试检查。详细案例范围和人工评分标准见 `evals/README.md`。
 
 ## 17. 项目结构与阅读顺序
 
 ```text
 agent/
-├── compact/
-│   ├── contracts.py              # 压缩输入输出约定
+├── context/
+│   ├── context.py                # 统一上下文策略接口
 │   └── window_compactor.py       # 裁剪轮次、截短工具文本
 ├── session/
 │   └── session.py                # 原始历史、配对检查、上下文组装
@@ -731,7 +731,7 @@ AGENT.MD                         # 项目协作约定
 1. `main.py`：看环境如何组装、用户输入从哪里进入。
 2. `loop/agent_loop.py`：看模型如何选择直接回答或调用工具。
 3. `session/session.py`：看消息如何保存、上下文如何组装。
-4. `compact/window_compactor.py` 与 `contracts.py`：看压缩策略和结果字段。
+4. `context/window_compactor.py` 与 `context/context.py`：看压缩策略和统一接口。
 5. `tool/lookup_order.py` 与订单存储：看一个工具如何把数据库事实交给模型。
 6. 再按需要阅读审批、Skill、Todo、Hook、子任务和评估。
 

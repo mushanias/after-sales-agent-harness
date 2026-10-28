@@ -334,6 +334,7 @@ def run_case(
 
     agent_loop_module = importlib.import_module("loop.agent_loop")
     agent_main = importlib.import_module("main")
+    context_module = importlib.import_module("context")
     session_module = importlib.import_module("session")
     skill_knowledge = importlib.import_module("knowledge.skill")
     order_store = importlib.import_module(
@@ -344,6 +345,7 @@ def run_case(
     original_database_path = order_store.DATABASE_PATH
     original_middleware = agent_loop_module.approval_middleware
     trace: list[dict[str, Any]] = []
+    context = context_module.WindowContextProjector()
     session = session_module.Session(
         system_prompt=replace_prompt_date(
             agent_main.SYSTEM_PROMPT,
@@ -385,6 +387,7 @@ def run_case(
                         limited_client,
                         model,
                         session,
+                        context,
                     )
                     or ""
                 )
